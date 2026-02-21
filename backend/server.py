@@ -23,12 +23,12 @@ app = FastAPI(
 # 2. Conversation memory (in-memory only — lost when server stops)
 # ---------------------------------------------------------------------------
 # Each entry: {"role": "user" | "assistant", "content": "text"}
-# We trim to the last 20 messages so the list does not grow forever.
-MAX_HISTORY_MESSAGES = 10
-# When building the prompt we use at most the last 10 exchanges (20 messages).
-MAX_EXCHANGES_IN_PROMPT = 10
+# Prompt uses: system + profile + conversation_summary + last RECENT_MESSAGES_COUNT only.
+RECENT_MESSAGES_COUNT = 6
+MAX_HISTORY_MESSAGES = 50  # cap full history so summary input stays bounded
 
 conversation_history = []
+conversation_summary = ""  # short text, updated every 6 messages via LLM
 
 
 def trim_history():
@@ -159,6 +159,43 @@ def get_system_prompt() -> str:
 OLLAMA_URL = "http://localhost:11434/api/generate"
 MODEL_NAME = "qwen2.5:3b"
 
+
+def _call_ollama(prompt: str, timeout: int = 30) -> str:
+    """Send a single prompt to Ollama; return stripped response text."""
+    try:
+        r = requests.post(
+            OLLAMA_URL,
+            json={"model": MODEL_NAME, "prompt": prompt, "stream": False},
+            timeout=timeout,
+        )
+        r.raise_for_status()
+        return r.json().get("response", "").strip()
+    except (requests.exceptions.RequestException, ValueError):
+        return ""
+
+
+def update_summary(history: list[dict], old_summary: str) -> str:
+    """
+    Summarize the conversation for a children's assistant in under 40 words.
+    Called every 6 messages; do not call every turn.
+    """
+    if not history:
+        return old_summary or ""
+    lines = []
+    for entry in history:
+        role = "User" if entry["role"] == "user" else "Assistant"
+        lines.append(f"{role}: {entry['content'].strip()}")
+    conv_block = "\n".join(lines)
+    prev = f"Previous summary: {old_summary}\n\n" if old_summary else ""
+    prompt = f"""Summarize the conversation for a children's assistant in under 40 words.
+
+{prev}Conversation:
+{conv_block}
+
+Summary:"""
+    return _call_ollama(prompt) or old_summary or ""
+
+
 # ---------------------------------------------------------------------------
 # 5. Request model — what the client sends in the body of POST /chat
 # ---------------------------------------------------------------------------
@@ -167,35 +204,29 @@ class ChatRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# 6. Prompt builder — system prompt + recent history + new user message
+# 6. Prompt builder — system + profile + summary + recent_messages only
 # ---------------------------------------------------------------------------
-def build_prompt(user_message: str) -> str:
+def build_prompt() -> str:
     """
-    Builds the full prompt for Ollama:
-    1. System prompt (personality).
-    2. Last N exchanges from conversation_history (includes the new user message we just added).
-    3. End with "Assistant:" so the LLM continues with its reply.
-
-    We only include the last MAX_EXCHANGES_IN_PROMPT exchanges so the prompt
-    does not get too long for the model.
+    Assembles: SYSTEM PROMPT + CHILD PROFILE + CONVERSATION SUMMARY + RECENT MESSAGES (last 6).
+    No full history; keeps token usage low for small context windows.
     """
     parts = [get_system_prompt()]
 
-    # Take the last N messages (each "exchange" = 1 user + 1 assistant, so 2 messages per exchange)
-    num_messages = min(MAX_EXCHANGES_IN_PROMPT * 2, len(conversation_history))
-    recent = conversation_history[-num_messages:] if num_messages > 0 else []
+    if conversation_summary:
+        parts.append("Conversation summary:\n")
+        parts.append(conversation_summary.strip())
+        parts.append("\n\n")
 
-    for entry in recent:
-        role = entry["role"]
-        content = entry["content"].strip()
-        if role == "user":
-            parts.append(f"User: {content}\n")
-        else:
-            parts.append(f"Assistant: {content}\n")
+    recent = conversation_history[-RECENT_MESSAGES_COUNT:] if conversation_history else []
+    if recent:
+        parts.append("Recent messages:\n")
+        for entry in recent:
+            role = "User" if entry["role"] == "user" else "Assistant"
+            parts.append(f"{role}: {entry['content'].strip()}\n")
+        parts.append("\n")
 
-    # Conversation history already ends with the new user message; now we ask for the reply
     parts.append("Assistant:")
-
     return "".join(parts)
 
 
@@ -224,8 +255,8 @@ def chat(request: ChatRequest):
     conversation_history.append({"role": "user", "content": user_message})
     trim_history()
 
-    # Step 2 & 3: Build prompt (includes system + recent history + this user message)
-    full_prompt = build_prompt(user_message)
+    # Step 2 & 3: Build prompt (system + profile + summary + last 6 messages)
+    full_prompt = build_prompt()
 
     ollama_payload = {
         "model": MODEL_NAME,
@@ -281,6 +312,11 @@ def chat(request: ChatRequest):
     conversation_history.append({"role": "assistant", "content": llm_reply})
     trim_history()
 
+    # Step 5: Every 6 messages, update conversation summary (do not summarize every turn)
+    global conversation_summary
+    if len(conversation_history) >= 6 and len(conversation_history) % 6 == 0:
+        conversation_summary = update_summary(conversation_history, conversation_summary)
+
     return {"reply": llm_reply}
 
 
@@ -307,9 +343,10 @@ def reset_profile():
 # ---------------------------------------------------------------------------
 @app.post("/reset")
 def reset():
-    """Clears all conversation history. Use when starting a new topic or session."""
-    global conversation_history
+    """Clears all conversation history and summary. Use when starting a new topic or session."""
+    global conversation_history, conversation_summary
     conversation_history = []
+    conversation_summary = ""
     return {"status": "memory cleared"}
 
 

@@ -8,18 +8,6 @@
 
 import Foundation
 
-// MARK: - Conversation state
-
-/// Tracks where we are in the conversation so the UI can show the right feedback.
-/// Pacing (idle → listening → thinking → speaking → idle) avoids instant replies
-/// and makes the experience calmer for a young child.
-enum ConversationState {
-    case idle
-    case listening
-    case thinking
-    case speaking
-}
-
 /// Request body we send to the backend.
 private struct ChatRequest: Encodable {
     let message: String

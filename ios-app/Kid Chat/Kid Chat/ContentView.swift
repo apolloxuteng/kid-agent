@@ -2,11 +2,9 @@
 //  ContentView.swift
 //  Kid Chat
 //
-//  Kid-friendly chat UI: soft colors, rounded shapes, clear states.
-//  Designed for ages 3–7:
-//  - Large tap targets (e.g. 64pt mic, big send) for easier tapping.
-//  - Rounded typography and 18–20pt font for readability.
-//  - Sufficient contrast (white/orange on green/orange) for accessibility.
+//  Kid-friendly chat UI: soft gradient, rounded fonts, clear states.
+//  Layout: VStack (CharacterHeaderView → ScrollView (messages) → input bar → Spacer → LargeMicButton).
+//  Full-screen gradient background; safe area padding respected. Rounded system font throughout.
 //
 
 import SwiftUI
@@ -33,12 +31,13 @@ enum KidTheme {
 
 struct ContentView: View {
     @StateObject private var viewModel = ChatViewModel()
+    @StateObject private var conversationViewModel = ConversationViewModel()
     @StateObject private var speechRecognizer = SpeechRecognizer()
 
     var body: some View {
         NavigationStack {
-            ZStack(alignment: .bottom) {
-                // Soft gradient background (calm, not saturated)
+            ZStack {
+                // Soft gradient background for entire screen (extends under status bar / home indicator)
                 LinearGradient(
                     colors: [KidTheme.backgroundTop, KidTheme.backgroundBottom],
                     startPoint: .top,
@@ -46,95 +45,63 @@ struct ContentView: View {
                 )
                 .ignoresSafeArea()
 
-                GeometryReader { geo in
-                    VStack(spacing: 0) {
-                        // Friendly header: emoji, title, status
-                        chatHeader
+                VStack(spacing: 0) {
+                    CharacterHeaderView(conversationViewModel: conversationViewModel)
                             .padding(.top, 8)
                             .padding(.bottom, 4)
 
-                        // Fixed height so ScrollView scrolls instead of expanding (ZStack doesn’t bound the list otherwise)
-                        messageList
-                            .frame(height: max(100, geo.size.height - 140))
-                    }
+                        ScrollViewReader { proxy in
+                            ScrollView {
+                                messageListContent(proxy: proxy)
+                            }
+                            .modifier(BottomScrollAnchorModifier())
+                            .onChange(of: viewModel.messages.count) { _ in
+                                if let last = viewModel.messages.last {
+                                    withAnimation(.easeOut(duration: 0.35)) {
+                                        proxy.scrollTo(last.id, anchor: .bottom)
+                                    }
+                                }
+                            }
+                        }
+                        .scrollDismissesKeyboard(.interactively)
+                        .frame(maxHeight: .infinity)
+
+                    inputBar
+
+                    Spacer(minLength: 12)
+
+                    micButton
+                        .padding(.bottom, 16)
                 }
-
-                // Input bar at bottom (above safe area)
-                inputBar
-
-                // Large floating mic button (kid-sized tap target)
-                micButton
+                .padding(.horizontal, 16)
             }
             .navigationBarTitleDisplayMode(.inline)
             .navigationBarHidden(true)
+            .onChange(of: viewModel.conversationState) { newState in
+                conversationViewModel.state = newState
+            }
         }
     }
 
-    // MARK: - Header (emoji + title + status)
+    // MARK: - Message list (content inside ScrollView; proxy passed from parent)
 
-    private var chatHeader: some View {
-        VStack(spacing: 6) {
-            Text("🐻")
-                .font(.system(size: 44))
-            Text("Chat Buddy")
-                .font(.system(size: 24, weight: .bold, design: .rounded))
-                .foregroundStyle(KidTheme.bubbleTextAI)
-
-            if viewModel.conversationState != .idle {
-                Group {
-                    if viewModel.conversationState == .thinking {
-                        ThinkingDotsView()
-                    } else {
-                        Text(headerStatusText)
-                            .font(.system(size: 16, weight: .medium, design: .rounded))
-                            .foregroundStyle(.secondary)
-                    }
-                }
+    @ViewBuilder
+    private func messageListContent(proxy: ScrollViewProxy) -> some View {
+        LazyVStack(alignment: .leading, spacing: 14) {
+            ForEach(viewModel.messages) { message in
+                MessageBubble(message: message)
+                    .id(message.id)
+                    .transition(.asymmetric(
+                        insertion: .opacity
+                            .combined(with: .move(edge: .bottom))
+                            .combined(with: .scale(scale: 0.96)),
+                        removal: .opacity
+                    ))
             }
         }
-        .frame(maxWidth: .infinity)
-    }
-
-    private var headerStatusText: String {
-        switch viewModel.conversationState {
-        case .idle: return ""
-        case .listening: return "Listening…"
-        case .thinking: return ""
-        case .speaking: return "Speaking…"
-        }
-    }
-
-    // MARK: - Message list
-
-    private var messageList: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 14) {
-                    ForEach(viewModel.messages) { message in
-                        MessageBubble(message: message)
-                            .id(message.id)
-                            .transition(.asymmetric(
-                                insertion: .opacity
-                                    .combined(with: .move(edge: .bottom))
-                                    .combined(with: .scale(scale: 0.96)),
-                                removal: .opacity
-                            ))
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
-                .padding(.bottom, 200)
-            }
-            .modifier(BottomScrollAnchorModifier())
-            .onChange(of: viewModel.messages.count) { _ in
-                if let last = viewModel.messages.last {
-                    withAnimation(.easeOut(duration: 0.35)) {
-                        proxy.scrollTo(last.id, anchor: .bottom)
-                    }
-                }
-            }
-        }
-        .scrollDismissesKeyboard(.interactively)
+        .padding(.horizontal, 0)
+        .padding(.top, 12)
+        .padding(.bottom, 120)
     }
 
     // MARK: - Input bar (text field + send)
@@ -157,6 +124,7 @@ struct ContentView: View {
                         viewModel.inputText = speechRecognizer.transcript
                     }
                     viewModel.setConversationState(speechRecognizer.isRecording ? .listening : .idle)
+                    conversationViewModel.state = speechRecognizer.isRecording ? .listening : .idle
                 }
                 .onChange(of: speechRecognizer.transcript) { _ in
                     if speechRecognizer.isRecording {
@@ -174,7 +142,7 @@ struct ContentView: View {
             .disabled(
                 viewModel.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || viewModel.isLoading
-                || viewModel.conversationState == .speaking
+                || conversationViewModel.state == .speaking
             )
         }
         .padding(.horizontal, 16)
@@ -192,27 +160,15 @@ struct ContentView: View {
     // MARK: - Floating mic (large tap target, state-based color)
 
     private var micButton: some View {
-        let isListening = speechRecognizer.isRecording
-        let isSpeaking = viewModel.conversationState == .speaking
-        let color: Color = isListening ? KidTheme.micListening : (isSpeaking ? KidTheme.micSpeaking : KidTheme.micIdle)
-
-        return Button {
+        LargeMicButton(state: conversationViewModel.state, onTap: {
+            if !speechRecognizer.isRecording {
+                conversationViewModel.state = .listening
+                viewModel.setConversationState(.listening)
+            }
             speechRecognizer.toggleRecording()
-        } label: {
-            Image(systemName: "mic.fill")
-                .font(.system(size: 28))
-                .foregroundStyle(.white)
-                .frame(width: 64, height: 64)
-                .background(
-                    Circle()
-                        .fill(color.gradient)
-                        .shadow(color: color.opacity(0.4), radius: isListening ? 12 : 6)
-                )
-        }
-        .disabled(viewModel.isLoading || isSpeaking)
-        .padding(.bottom, 100)
-        .scaleEffect(isListening ? 1.08 : 1.0)
-        .animation(.easeInOut(duration: 0.3), value: isListening)
+        })
+            .disabled(viewModel.isLoading || conversationViewModel.state == .speaking)
+            .padding(.bottom, 100)
     }
 }
 
