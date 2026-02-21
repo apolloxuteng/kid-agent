@@ -3,7 +3,7 @@
 //  Kid Chat
 //
 //  Kid-friendly chat UI: soft gradient, rounded fonts, clear states.
-//  Layout: VStack (CharacterHeaderView → ScrollView (messages) → input bar → Spacer → LargeMicButton).
+//  Layout: VStack (header → ScrollView → input bar); mic button overlaid at bottom.
 //  Full-screen gradient background; safe area padding respected. Rounded system font throughout.
 //
 
@@ -30,14 +30,31 @@ enum KidTheme {
 // MARK: - Main view
 
 struct ContentView: View {
+    @State private var appMode: AppMode = .greeting
+    /// When user taps "Tell me a story", we send this once when chat appears so the LLM starts with a story.
+    @State private var pendingStarter: GreetingStarter?
     @StateObject private var viewModel = ChatViewModel()
     @StateObject private var conversationViewModel = ConversationViewModel()
     @StateObject private var speechRecognizer = SpeechRecognizer()
 
     var body: some View {
+        Group {
+            if appMode == .greeting {
+                GreetingView(onStartChat: { starter in
+                    pendingStarter = starter
+                    appMode = .chatting
+                })
+            } else {
+                chatView
+            }
+        }
+    }
+
+    /// Chat UI: header, messages, input bar, mic. Shown when appMode == .chatting.
+    private var chatView: some View {
         NavigationStack {
-            ZStack {
-                // Soft gradient background for entire screen (extends under status bar / home indicator)
+            ZStack(alignment: .bottom) {
+                // Soft gradient background for entire screen
                 LinearGradient(
                     colors: [KidTheme.backgroundTop, KidTheme.backgroundBottom],
                     startPoint: .top,
@@ -45,40 +62,47 @@ struct ContentView: View {
                 )
                 .ignoresSafeArea()
 
+                // Main content: header, messages, input bar (mic is overlaid below so conversation gets more space)
                 VStack(spacing: 0) {
                     CharacterHeaderView(conversationViewModel: conversationViewModel)
-                            .padding(.top, 8)
-                            .padding(.bottom, 4)
+                        .padding(.top, 8)
+                        .padding(.bottom, 4)
 
-                        ScrollViewReader { proxy in
-                            ScrollView {
-                                messageListContent(proxy: proxy)
-                            }
-                            .modifier(BottomScrollAnchorModifier())
-                            .onChange(of: viewModel.messages.count) { _ in
-                                if let last = viewModel.messages.last {
-                                    withAnimation(.easeOut(duration: 0.35)) {
-                                        proxy.scrollTo(last.id, anchor: .bottom)
-                                    }
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            messageListContent(proxy: proxy)
+                        }
+                        .modifier(BottomScrollAnchorModifier())
+                        .onChange(of: viewModel.messages.count) { _ in
+                            if let last = viewModel.messages.last {
+                                withAnimation(.easeOut(duration: 0.35)) {
+                                    proxy.scrollTo(last.id, anchor: .bottom)
                                 }
                             }
                         }
-                        .scrollDismissesKeyboard(.interactively)
-                        .frame(maxHeight: .infinity)
+                    }
+                    .scrollDismissesKeyboard(.interactively)
+                    .frame(maxHeight: .infinity)
 
                     inputBar
-
-                    Spacer(minLength: 12)
-
-                    micButton
-                        .padding(.bottom, 16)
                 }
                 .padding(.horizontal, 16)
+
+                // Mic button floats at bottom (does not take space from conversation)
+                micButton
+                    .padding(.bottom, 24)
             }
             .navigationBarTitleDisplayMode(.inline)
             .navigationBarHidden(true)
             .onChange(of: viewModel.conversationState) { newState in
                 conversationViewModel.state = newState
+            }
+            .onAppear {
+                if pendingStarter == .story {
+                    viewModel.inputText = "Tell me a short story"
+                    viewModel.sendMessage()
+                    pendingStarter = nil
+                }
             }
         }
     }
@@ -119,12 +143,20 @@ struct ContentView: View {
                 .lineLimit(1 ... 4)
                 .submitLabel(.send)
                 .onSubmit { viewModel.sendMessage() }
-                .onChange(of: speechRecognizer.isRecording) { _ in
-                    if speechRecognizer.isRecording {
+                .onChange(of: speechRecognizer.isRecording) { isRecording in
+                    if isRecording {
                         viewModel.inputText = speechRecognizer.transcript
+                        viewModel.setConversationState(.listening)
+                        conversationViewModel.state = .listening
+                    } else {
+                        viewModel.setConversationState(.idle)
+                        conversationViewModel.state = .idle
+                        // Auto-send when user finishes talking (voice input only; manual typing still uses Send)
+                        let text = viewModel.inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !text.isEmpty {
+                            viewModel.sendMessage()
+                        }
                     }
-                    viewModel.setConversationState(speechRecognizer.isRecording ? .listening : .idle)
-                    conversationViewModel.state = speechRecognizer.isRecording ? .listening : .idle
                 }
                 .onChange(of: speechRecognizer.transcript) { _ in
                     if speechRecognizer.isRecording {
@@ -168,7 +200,6 @@ struct ContentView: View {
             speechRecognizer.toggleRecording()
         })
             .disabled(viewModel.isLoading || conversationViewModel.state == .speaking)
-            .padding(.bottom, 100)
     }
 }
 

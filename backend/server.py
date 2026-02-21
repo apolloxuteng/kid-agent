@@ -131,6 +131,7 @@ Rules you always follow:
 - You do not need to ask a question every time. Often just reply with a short, warm statement (a reaction, a fact, or encouragement) and let the child lead. Only ask a question occasionally when it fits naturally.
 - Never use complex jargon or long explanations.
 - Never produce scary, sad, or negative content. Keep everything safe and happy.
+- Reply with only your words. Do not include "User:", "Assistant:", or any role labels in your reply.
 
 """
 
@@ -204,7 +205,28 @@ class ChatRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# 6. Prompt builder — system + profile + summary + recent_messages only
+# 6. Strip role labels from model output (fixes completion-style models adding "User:" / "Assistant:")
+# ---------------------------------------------------------------------------
+def _strip_role_labels(text: str) -> str:
+    """Remove leading 'Assistant:' / 'User:' and similar so only the reply text is returned.
+    Helps especially with smaller completion-style models; larger chat models often follow
+    the 'no role labels' instruction better, but stripping is a safe fallback for any size."""
+    if not text:
+        return text
+    out = text.strip()
+    while True:
+        lower = out.lower().lstrip()
+        if lower.startswith("assistant:"):
+            out = out[out.lower().find("assistant:") + len("assistant:") :].strip()
+        elif lower.startswith("user:"):
+            out = out[out.lower().find("user:") + len("user:") :].strip()
+        else:
+            break
+    return out.strip()
+
+
+# ---------------------------------------------------------------------------
+# 7. Prompt builder — system + profile + summary + recent_messages only
 # ---------------------------------------------------------------------------
 def build_prompt() -> str:
     """
@@ -231,7 +253,7 @@ def build_prompt() -> str:
 
 
 # ---------------------------------------------------------------------------
-# 7. POST /chat — receive message, update memory, call Ollama, return reply
+# 8. POST /chat — receive message, update memory, call Ollama, return reply
 # ---------------------------------------------------------------------------
 @app.post("/chat")
 def chat(request: ChatRequest):
@@ -306,7 +328,8 @@ def chat(request: ChatRequest):
         )
 
     result = response.json()
-    llm_reply = result.get("response", "").strip()
+    raw_reply = result.get("response", "").strip()
+    llm_reply = _strip_role_labels(raw_reply)
 
     # Step 4: Add assistant reply to memory and trim
     conversation_history.append({"role": "assistant", "content": llm_reply})
@@ -321,7 +344,7 @@ def chat(request: ChatRequest):
 
 
 # ---------------------------------------------------------------------------
-# 8. GET /profile — return child profile (name, interests)
+# 9. GET /profile — return child profile (name, interests)
 # ---------------------------------------------------------------------------
 @app.get("/profile")
 def get_profile():

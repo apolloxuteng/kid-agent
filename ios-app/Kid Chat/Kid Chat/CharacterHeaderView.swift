@@ -3,7 +3,7 @@
 //  Kid Chat
 //
 //  Reusable header with large emoji avatar, character name, and status text.
-//  Status color and a gentle scale animation change with conversation state.
+//  When idle, avatar gently scales 1.0 ↔ 1.05 (~2s, repeats); animation stops when state changes.
 //
 
 import SwiftUI
@@ -52,16 +52,31 @@ struct CharacterHeaderView: View {
         .animation(.easeInOut(duration: 0.3), value: conversationViewModel.state)
     }
 
-    // MARK: - Avatar (emoji + circle + shadow)
+    // MARK: - Avatar (emoji + circle + shadow; idle = gentle breathing scale)
 
     private var avatarView: some View {
+        Group {
+            if conversationViewModel.state == .idle {
+                TimelineView(.animation(minimumInterval: 0.033)) { context in
+                    let t = context.date.timeIntervalSinceReferenceDate
+                    let scale = 1.0 + 0.025 * (1 + cos(.pi * t))
+                    avatarBody.scaleEffect(scale)
+                }
+            } else {
+                avatarBody
+                    .scaleEffect(1.04)
+                    .animation(.easeInOut(duration: 0.3), value: conversationViewModel.state)
+            }
+        }
+    }
+
+    /// Avatar content without scale (used by idle animation and non-idle state).
+    private var avatarBody: some View {
         Text(avatarEmoji)
             .font(.system(size: avatarFontSize))
             .frame(width: avatarCircleSize, height: avatarCircleSize)
             .background(Circle().fill(Color.white.opacity(0.9)))
             .shadow(color: .black.opacity(0.12), radius: 8, x: 0, y: 4)
-            .scaleEffect(conversationViewModel.state == .idle ? 1.0 : 1.04)
-            .animation(.easeInOut(duration: 0.3), value: conversationViewModel.state)
     }
 
     /// Status text color by state: idle = gray, listening = red, thinking = orange, speaking = purple.
