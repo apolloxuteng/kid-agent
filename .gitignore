@@ -1,0 +1,44 @@
+# Python
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.so
+.env
+.venv/
+
+# Backend: local profile (optional – remove this line if you want to commit a sample profile)
+backend/child_profile.json
+
+# macOS
+.DS_Store
+
+# Xcode / iOS
+*.xcuserstate
+*.xcworkspacedata
+xcuserdata/
+DerivedData/
+*.moved-aside
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
