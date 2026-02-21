@@ -34,8 +34,8 @@ private struct ChatResponse: Decodable {
 class ChatViewModel: ObservableObject {
 
     // MARK: - Configuration
-    /// Replace 192.168.X.X with your Mac Mini’s IP (e.g. from System Settings → Network).
-    /// The backend must be running at that address (e.g. uvicorn on port 8000).
+    /// Fixed IP from router DHCP reservation (does not change after restart). Update the IP below if your reserved address is different.
+    /// Run backend: uvicorn server:app --host 0.0.0.0
     static let SERVER_URL = "http://192.168.68.71:8000/chat"
 
     // MARK: - Published state (SwiftUI observes these and redraws when they change)

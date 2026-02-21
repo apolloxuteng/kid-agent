@@ -143,6 +143,7 @@ struct ContentView: View {
         HStack(alignment: .bottom, spacing: 12) {
             TextField("Message", text: $viewModel.inputText, axis: .vertical)
                 .font(.system(size: 18, weight: .medium, design: .rounded))
+                .foregroundStyle(KidTheme.bubbleTextAI)
                 .textFieldStyle(.plain)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)

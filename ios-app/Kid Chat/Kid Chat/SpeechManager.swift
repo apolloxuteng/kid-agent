@@ -29,6 +29,15 @@ final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
+        // Configure audio session for playback (mic leaves it in .record, so iPad gets no sound without this)
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(.playback, mode: .default, options: [.duckOthers, .defaultToSpeaker])
+            try session.setActive(true, options: .notifyOthersOnDeactivation)
+        } catch {
+            // Fallback: still try to speak
+        }
+
         // Safety: stop any current speech before starting new one
         if synthesizer.isSpeaking {
             synthesizer.stopSpeaking(at: .immediate)
