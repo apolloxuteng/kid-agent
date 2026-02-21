@@ -46,14 +46,17 @@ struct ContentView: View {
                 )
                 .ignoresSafeArea()
 
-                VStack(spacing: 0) {
-                    // Friendly header: emoji, title, status
-                    chatHeader
-                        .padding(.top, 8)
-                        .padding(.bottom, 4)
+                GeometryReader { geo in
+                    VStack(spacing: 0) {
+                        // Friendly header: emoji, title, status
+                        chatHeader
+                            .padding(.top, 8)
+                            .padding(.bottom, 4)
 
-                    messageList
-                        .frame(maxHeight: .infinity)
+                        // Fixed height so ScrollView scrolls instead of expanding (ZStack doesn’t bound the list otherwise)
+                        messageList
+                            .frame(height: max(100, geo.size.height - 140))
+                    }
                 }
 
                 // Input bar at bottom (above safe area)
