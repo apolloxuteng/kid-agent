@@ -10,9 +10,13 @@ import SwiftUI
 
 // MARK: - App mode
 
-/// Whether we show the greeting screen or the chat screen.
+/// App flow: profile selection → greeting → chat.
 enum AppMode {
+    /// Initial screen: choose which profile to use (or add one).
+    case selectProfile
+    /// Welcome screen with "Tell me a story" / "Ask anything".
     case greeting
+    /// Chat screen.
     case chatting
 }
 

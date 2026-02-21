@@ -41,24 +41,31 @@ The API will be available at **http://localhost:8000**.
 | Method | Path    | Description |
 |--------|---------|-------------|
 | GET    | /health | Health check; returns `{"status":"ok"}` |
-| GET    | /profile | Returns the stored child profile: `{"name": "...", "interests": [...]}`. |
-| POST   | /chat   | Send a message; body: `{"message": "your text"}`; returns `{"reply": "..."}`. Uses in-memory conversation history and updates the child profile from simple phrases (e.g. "my name is X", "I like X"). |
-| POST   | /reset  | Clear conversation memory; returns `{"status": "memory cleared"}`. Use when starting a new topic or session. |
-| POST   | /profile/reset | Clear the child profile (name and interests) and save to file. |
+| GET    | /profile | Returns the stored child profile for `profile_id` (query: `?profile_id=...`). |
+| POST   | /chat   | Send a message; body: `{"message": "your text", "profile_id": "uuid-or-id"}`; returns `{"reply": "..."}`. All memory and profile updates apply only to that profile. |
+| POST   | /reset  | Clear conversation memory for one profile; query: `?profile_id=...`. |
+| POST   | /profile/reset | Clear the child profile (name and interests) for one profile; query: `?profile_id=...`. |
+
+## Per-profile data (no database)
+
+- Each child is identified by **profile_id** (e.g. the app’s UUID for that profile). Data is stored under **`data/profiles/{profile_id}/`**:
+  - **profile.json** — name and interests (updated from messages)
+  - **summary.txt** — short conversation summary (updated every 6 messages)
+  - **history.json** — recent messages for context
+- The folder is **created automatically** when a profile is first used (e.g. first chat with that profile_id). No setup required.
+- **Memory is isolated per profile**: history and summary for one child never affect another. Resetting or clearing is per profile_id.
 
 ## Conversation memory
 
-- The server keeps a **conversation history** in RAM (a list of user and assistant messages). When you send a new message, the prompt sent to the LLM includes the last 10 exchanges so the assistant can answer in context (e.g. "What color was it?" after you talked about a car).
-- Memory is **in-memory only**: no database or files. It persists only while the server is running. When you stop the server, history is lost. This keeps the project simple and avoids storing data on disk.
-- History is **capped at 20 messages** so the list does not grow forever and the prompt stays a reasonable size for the model.
-- **POST /reset** clears the history. Call it when the child starts a new topic or you want a fresh conversation.
+- For each profile, the server **loads** that profile’s history and summary from disk, builds the prompt (system + profile + summary + last 6 messages), calls the LLM, then **saves** updated history and summary back to that profile’s folder.
+- History is **capped at 50 messages** per profile; a short summary is updated every 6 messages so context stays bounded without sending the full history every time.
+- **POST /reset?profile_id=...** clears history and summary for that profile only.
 
-## Child profile memory
+## Child profile (per profile_id)
 
-- The server keeps a **child profile** (name and interests) so the assistant can personalize replies (e.g. use the child’s name, mention their interests). This is **separate** from conversation history: the profile is **persistent** and stored in a file.
-- **Where it’s stored:** In the backend folder, in a file named **`child_profile.json`**. The server loads it at startup and saves it whenever the profile is updated from a message.
-- **How it’s updated:** Simple pattern matching on the user’s message (no extra LLM call). For example: “my name is Emma” → name is set; “I like dinosaurs” → “dinosaurs” is added to interests. Interests are capped at 10; very long or empty values are ignored.
-- **How to reset the profile:** Call **POST /profile/reset** to clear name and interests and overwrite the file. Or delete `child_profile.json` manually and restart the server.
+- Each profile has its own **profile.json** (name and interests) so the assistant can personalize replies (e.g. use the child’s name, mention their interests).
+- **How it’s updated:** Simple pattern matching on the user’s message (no extra LLM call). For example: “my name is Emma” → name is set; “I like dinosaurs” → “dinosaurs” is added to interests. Interests are capped at 10.
+- **POST /profile/reset?profile_id=...** clears name and interests for that profile only.
 
 ## Configuration
 

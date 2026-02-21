@@ -4,6 +4,7 @@
 //
 //  Reusable header with large emoji avatar, character name, and status text.
 //  When idle, avatar gently scales 1.0 ↔ 1.05 (~2s, repeats); animation stops when state changes.
+//  Avatar shows the active child profile (or default Astro Buddy); tapping it opens the profile picker.
 //
 
 import SwiftUI
@@ -11,14 +12,22 @@ import SwiftUI
 // MARK: - Character header
 
 /// A centered header showing an avatar, character name, and status from ConversationViewModel.
-/// Uses a soft gradient background, rounded fonts, and state-based status color + scale animation.
+/// Avatar and name come from the active child profile (ProfileManager); tap avatar to switch profiles.
 struct CharacterHeaderView: View {
+    @EnvironmentObject private var profileManager: ProfileManager
     @ObservedObject var conversationViewModel: ConversationViewModel
 
-    /// Emoji used as the character avatar (e.g. 🤖 for Astro Buddy).
-    private let avatarEmoji = "🤖"
-    /// Character name shown below the avatar.
-    private let characterName = "Astro Buddy"
+    /// Called when the user taps the avatar; ContentView uses this to present the profile picker sheet.
+    var onAvatarTap: () -> Void = {}
+
+    /// Emoji for avatar: active profile's or default Astro Buddy.
+    private var avatarEmoji: String {
+        profileManager.activeProfile?.avatar ?? "🤖"
+    }
+    /// Name below avatar: active profile's name or default character name.
+    private var characterName: String {
+        profileManager.activeProfile?.name ?? "Astro Buddy"
+    }
 
     /// Avatar size: large and friendly for kids.
     private let avatarFontSize: CGFloat = 65
@@ -27,8 +36,11 @@ struct CharacterHeaderView: View {
 
     var body: some View {
         VStack(spacing: 10) {
-            // Large emoji avatar with circular background and subtle shadow
-            avatarView
+            // Large emoji avatar; tap to open profile picker
+            Button(action: onAvatarTap) {
+                avatarView
+            }
+            .buttonStyle(.plain)
 
             // Character name: rounded, bold, friendly
             Text(characterName)
@@ -94,5 +106,6 @@ struct CharacterHeaderView: View {
 
 #Preview {
     CharacterHeaderView(conversationViewModel: ConversationViewModel())
+        .environmentObject(ProfileManager())
         .padding()
 }

@@ -1,0 +1,10 @@
+[
+  {
+    "role": "user",
+    "content": "Tell me a short story"
+  },
+  {
+    "role": "assistant",
+    "content": "Once upon a time, in a bright blue sky, there was a yellow bird named Benny who loved to sing. One sunny day, he met a pretty butterfly with spots. They decided to play on a big green leaf. Suddenly, they saw fluffy clouds dancing by the sun. The bird and butterfly laughed and fluttered together under the clear blue sky. Isn't that nice?"
+  }
+]

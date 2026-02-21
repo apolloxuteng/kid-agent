@@ -8,9 +8,10 @@
 
 import Foundation
 
-/// Request body we send to the backend.
+/// Request body we send to the backend (must include profile_id for per-child memory).
 private struct ChatRequest: Encodable {
     let message: String
+    let profile_id: String  // UUID string of the active child profile; backend stores data under data/profiles/{profile_id}/
 }
 
 /// Response body we get back from the backend.
@@ -39,6 +40,10 @@ class ChatViewModel: ObservableObject {
 
     /// Drives status text and button states (listening / thinking / speaking).
     @Published var conversationState: ConversationState = .idle
+
+    /// Active child profile id; set by ContentView from ProfileManager. Backend uses this for isolated memory.
+    /// When nil, we send "default" so the backend still works before any profile is added.
+    var activeProfileId: UUID?
 
     /// Speaks AI replies aloud using the system TTS.
     private let speechManager = SpeechManager()
@@ -105,7 +110,8 @@ class ChatViewModel: ObservableObject {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONEncoder().encode(ChatRequest(message: userMessageText))
+        let profileIdString = activeProfileId?.uuidString ?? "default"
+        request.httpBody = try? JSONEncoder().encode(ChatRequest(message: userMessageText, profile_id: profileIdString))
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)

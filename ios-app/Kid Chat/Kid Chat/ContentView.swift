@@ -30,21 +30,29 @@ enum KidTheme {
 // MARK: - Main view
 
 struct ContentView: View {
-    @State private var appMode: AppMode = .greeting
+    @EnvironmentObject private var profileManager: ProfileManager
+    @State private var appMode: AppMode = .selectProfile
     /// When user taps "Tell me a story", we send this once when chat appears so the LLM starts with a story.
     @State private var pendingStarter: GreetingStarter?
     @StateObject private var viewModel = ChatViewModel()
     @StateObject private var conversationViewModel = ConversationViewModel()
     @StateObject private var speechRecognizer = SpeechRecognizer()
+    /// When true, the profile picker sheet is presented (triggered by tapping avatar in header).
+    @State private var showProfilePicker = false
 
     var body: some View {
         Group {
-            if appMode == .greeting {
+            switch appMode {
+            case .selectProfile:
+                ProfileSelectionView(onContinue: {
+                    appMode = .greeting
+                })
+            case .greeting:
                 GreetingView(onStartChat: { starter in
                     pendingStarter = starter
                     appMode = .chatting
                 })
-            } else {
+            case .chatting:
                 chatView
             }
         }
@@ -64,9 +72,11 @@ struct ContentView: View {
 
                 // Main content: header, messages, input bar (mic is overlaid below so conversation gets more space)
                 VStack(spacing: 0) {
-                    CharacterHeaderView(conversationViewModel: conversationViewModel)
-                        .padding(.top, 8)
-                        .padding(.bottom, 4)
+                    CharacterHeaderView(conversationViewModel: conversationViewModel, onAvatarTap: {
+                        showProfilePicker = true
+                    })
+                    .padding(.top, 8)
+                    .padding(.bottom, 4)
 
                     ScrollViewReader { proxy in
                         ScrollView {
@@ -97,7 +107,20 @@ struct ContentView: View {
             .onChange(of: viewModel.conversationState) { newState in
                 conversationViewModel.state = newState
             }
+            .onChange(of: profileManager.activeProfile?.id) { _ in
+                viewModel.activeProfileId = profileManager.activeProfile?.id
+                // Switching profile resets chat UI so each child gets a fresh conversation.
+                viewModel.messages = []
+                viewModel.inputText = ""
+                viewModel.isLoading = false
+                viewModel.setConversationState(.idle)
+                conversationViewModel.state = .idle
+            }
+            .sheet(isPresented: $showProfilePicker) {
+                ProfilePickerView()
+            }
             .onAppear {
+                viewModel.activeProfileId = profileManager.activeProfile?.id
                 if pendingStarter == .story {
                     viewModel.inputText = "Tell me a short story"
                     viewModel.sendMessage()
@@ -267,4 +290,5 @@ private struct BottomScrollAnchorModifier: ViewModifier {
 
 #Preview {
     ContentView()
+        .environmentObject(ProfileManager())
 }
