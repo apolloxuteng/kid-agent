@@ -14,23 +14,29 @@ import SwiftUI
 enum AppMode {
     /// Initial screen: choose which profile to use (or add one).
     case selectProfile
-    /// Welcome screen with "Tell me a story" / "Ask anything".
+    /// Welcome screen with four mode buttons (Story, Knowledge, Question, Joke).
     case greeting
     /// Chat screen.
     case chatting
 }
 
-/// Which greeting button the user tapped (so chat can e.g. auto-send "Tell me a story").
+/// Which greeting mode the user chose; chat may auto-send a starter message for the server.
 enum GreetingStarter {
+    /// Server replies with a funny story.
     case story
-    case askAnything
+    /// Server introduces a country, celebrity, or place in the world.
+    case knowledge
+    /// Kid asks questions to get started; no auto-send.
+    case question
+    /// Server starts the conversation with a funny joke.
+    case joke
 }
 
 // MARK: - Greeting view
 
-/// Welcome screen: avatar, greeting, subtitle, and two large buttons that call onStartChat(starter).
+/// Welcome screen: avatar, greeting, subtitle, and four mode buttons that call onStartChat(starter).
 struct GreetingView: View {
-    /// Called when the user taps a button. Pass .story or .askAnything so chat can start accordingly.
+    /// Called when the user taps a button. Pass the chosen mode so chat can start accordingly.
     var onStartChat: (GreetingStarter) -> Void
 
     /// Gradient for the greeting screen (colorful, kid-friendly).
@@ -74,10 +80,12 @@ struct GreetingView: View {
 
                 Spacer()
 
-                // Two large full-width buttons
-                VStack(spacing: 16) {
-                    greetingButton(emoji: "📖", title: "Tell me a story", starter: .story)
-                    greetingButton(emoji: "❓", title: "Ask anything", starter: .askAnything)
+                // Four mode buttons: Story, Knowledge, Question, Joke
+                VStack(spacing: 12) {
+                    greetingButton(emoji: "📖", title: "Story Mode", subtitle: "Get a funny story", starter: .story)
+                    greetingButton(emoji: "🌍", title: "Knowledge Mode", subtitle: "Learn about a country, person, or place", starter: .knowledge)
+                    greetingButton(emoji: "❓", title: "Question Mode", subtitle: "Ask me anything", starter: .question)
+                    greetingButton(emoji: "😂", title: "Joke Mode", subtitle: "Hear a funny joke", starter: .joke)
                 }
                 .padding(.horizontal, 24)
                 .padding(.bottom, 48)
@@ -85,23 +93,30 @@ struct GreetingView: View {
         }
     }
 
-    /// One large rounded button; triggers onStartChat(starter) when pressed.
-    private func greetingButton(emoji: String, title: String, starter: GreetingStarter) -> some View {
+    /// One rounded button with optional subtitle; triggers onStartChat(starter) when pressed.
+    private func greetingButton(emoji: String, title: String, subtitle: String, starter: GreetingStarter) -> some View {
         Button(action: { onStartChat(starter) }) {
             HStack(spacing: 12) {
                 Text(emoji)
-                    .font(.system(size: 28))
-                Text(title)
-                    .font(.system(size: 22, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white)
+                    .font(.system(size: 26))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 18, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white)
+                    Text(subtitle)
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.9))
+                }
+                Spacer(minLength: 0)
             }
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 20)
+            .padding(.vertical, 14)
+            .padding(.horizontal, 16)
             .background(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .fill(buttonColor.gradient)
             )
-            .shadow(color: .black.opacity(0.12), radius: 8, x: 0, y: 4)
+            .shadow(color: .black.opacity(0.12), radius: 6, x: 0, y: 3)
         }
         .buttonStyle(.plain)
     }

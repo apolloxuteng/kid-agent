@@ -27,6 +27,7 @@ final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
     private let exclamationPitch: Float = 1.28
 
     /// Queue of sentences to speak; we speak one at a time and advance in the delegate.
+    /// All access must happen on the main queue to avoid races with the synthesizer delegate.
     private var sentenceQueue: [AVSpeechUtterance] = []
     /// Called when all sentences have finished (so UI can set conversationState = .idle).
     var onDidFinishSpeaking: (() -> Void)?
@@ -41,6 +42,12 @@ final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
     /// with emotional variation. Stops any current speech first.
     /// Emojis and punctuation are stripped before speaking so TTS doesn't read them aloud.
     func speak(_ text: String) {
+        dispatchToMainIfNeeded {
+            self._speak(text)
+        }
+    }
+
+    private func _speak(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
@@ -53,14 +60,25 @@ final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
 
         let textNoEmoji = stripEmojis(trimmed)
         let sentences = splitIntoSentences(textNoEmoji)
-        sentenceQueue = sentences.map { utterance(for: $0) }
+        sentenceQueue = sentences.compactMap { s -> AVSpeechUtterance? in
+            let u = utterance(for: s)
+            guard !u.speechString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return u
+        }
 
         startNextInQueueIfNeeded()
     }
 
     /// Appends more text to the speech queue and starts speaking if not already.
     /// Use this during streaming so voice can start before the full message arrives.
+    /// All queue access is serialized on the main queue to prevent skip/duplicate from delegate races.
     func enqueueMore(_ text: String) {
+        dispatchToMainIfNeeded {
+            self._enqueueMore(text)
+        }
+    }
+
+    private func _enqueueMore(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
@@ -69,9 +87,21 @@ final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
         let textNoEmoji = stripEmojis(trimmed)
         let sentences = splitIntoSentences(textNoEmoji)
         for s in sentences {
-            sentenceQueue.append(utterance(for: s))
+            let u = utterance(for: s)
+            // Skip empty utterances so the synthesizer doesn't get stuck (no didFinish) and leave mic purple
+            guard !u.speechString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            sentenceQueue.append(u)
         }
         startNextInQueueIfNeeded()
+    }
+
+    /// Run the block on the main queue. If already on main, run synchronously to keep ordering.
+    private func dispatchToMainIfNeeded(_ block: @escaping () -> Void) {
+        if Thread.isMainThread {
+            block()
+        } else {
+            DispatchQueue.main.async(execute: block)
+        }
     }
 
     private func ensureAudioSession() {
@@ -83,17 +113,31 @@ final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
         } catch { }
     }
 
-    private func startNextInQueueIfNeeded() {
-        guard !sentenceQueue.isEmpty, !synthesizer.isSpeaking else {
-            if sentenceQueue.isEmpty { onDidFinishSpeaking?() }
+    /// Must be called on the main queue only. Starts the next queued utterance or notifies that we're done.
+    /// Skips empty utterances so we never get stuck with the synthesizer not calling didFinish.
+    /// - Parameter continuingAfterFinish: When true (from delegate), we don't check isSpeaking so we always advance; the synthesizer can still report isSpeaking briefly after didFinish and would otherwise block the next utterance and onDidFinishSpeaking.
+    private func startNextInQueueIfNeeded(continuingAfterFinish: Bool = false) {
+        if !continuingAfterFinish && synthesizer.isSpeaking { return }
+        while let next = sentenceQueue.first {
+            sentenceQueue.removeFirst()
+            let text = next.speechString.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { continue }
+            synthesizer.speak(next)
             return
         }
-        let next = sentenceQueue.removeFirst()
-        synthesizer.speak(next)
+        onDidFinishSpeaking?()
     }
 
-    /// Stops playback immediately.
+    /// Stops playback immediately. Safe to call from any thread.
     func stop() {
+        if Thread.isMainThread {
+            _stop()
+        } else {
+            DispatchQueue.main.async { [weak self] in self?._stop() }
+        }
+    }
+
+    private func _stop() {
         synthesizer.stopSpeaking(at: .immediate)
         sentenceQueue.removeAll()
     }
@@ -137,7 +181,10 @@ final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
         }
         let remainder = current.trimmingCharacters(in: .whitespaces)
         if !remainder.isEmpty { results.append(remainder) }
-        return results.isEmpty ? [text] : results
+        if results.isEmpty {
+            return text.trimmingCharacters(in: .whitespaces).isEmpty ? [] : [text]
+        }
+        return results
     }
 
     // MARK: - Utterance configuration
@@ -180,14 +227,11 @@ final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
 
     // MARK: - AVSpeechSynthesizerDelegate
 
+    /// Called on a background thread by AVSpeechSynthesizer. We dispatch to main so all queue access is serialized.
+    /// We pass continuingAfterFinish: true so we always run the next or call onDidFinishSpeaking; the synthesizer can still report isSpeaking briefly and would otherwise leave the mic stuck purple.
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-        if let next = sentenceQueue.first {
-            sentenceQueue.removeFirst()
-            synthesizer.speak(next)
-        } else {
-            DispatchQueue.main.async { [weak self] in
-                self?.onDidFinishSpeaking?()
-            }
+        DispatchQueue.main.async { [weak self] in
+            self?.startNextInQueueIfNeeded(continuingAfterFinish: true)
         }
     }
 }

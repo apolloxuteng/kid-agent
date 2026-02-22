@@ -11,5 +11,7 @@
 	<string>Kid Chat uses the microphone so you can speak your message instead of typing.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Kid Chat converts your voice into text so you can send a message by talking.</string>
+	<key>ServerBaseURL</key>
+	<string>http://192.168.68.71:8000</string>
 </dict>
 </plist>

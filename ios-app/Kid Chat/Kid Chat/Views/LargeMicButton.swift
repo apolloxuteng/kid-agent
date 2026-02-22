@@ -37,6 +37,7 @@ struct LargeMicButton: View {
         .modifier(ListeningPulseModifier(state: state))
         .animation(.easeInOut(duration: 0.3), value: state)
         .accessibilityLabel("Tap to talk")
+        .accessibilityHint("Starts or stops voice input; when assistant is speaking, tap to stop")
     }
 
     // MARK: - Background and shadow by state

@@ -31,13 +31,17 @@ private struct StreamEvent: Decodable {
 class ChatViewModel: ObservableObject {
 
     // MARK: - Configuration
-    /// Fixed IP from router DHCP reservation (does not change after restart). Update the IP below if your reserved address is different.
-    /// Run backend: uvicorn server:app --host 0.0.0.0
-    static let SERVER_BASE = "http://192.168.68.71:8000"
+    /// Server base URL. Read from Info.plist key "ServerBaseURL" if set; otherwise default. Run backend: uvicorn server:app --host 0.0.0.0
+    static var SERVER_BASE: String {
+        (Bundle.main.infoDictionary?["ServerBaseURL"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? "http://192.168.68.71:8000"
+    }
     /// Streaming endpoint: same body as /chat, returns SSE (token / done / error).
     static var streamURL: URL? { URL(string: SERVER_BASE + "/chat/stream") }
     /// Non-streaming fallback when streaming fails.
     static var chatURL: URL? { URL(string: SERVER_BASE + "/chat") }
+    /// Keep only the last N messages to bound memory in long sessions.
+    private static let maxMessages = 100
 
     // MARK: - Published state (SwiftUI observes these and redraws when they change)
 
@@ -50,8 +54,11 @@ class ChatViewModel: ObservableObject {
     /// True while we’re waiting for the backend reply (used to disable Send and show loading).
     @Published var isLoading: Bool = false
 
-    /// Drives status text and button states (listening / thinking / speaking).
+    /// Drives status text and button states (listening / thinking / speaking). Single source of truth for conversation state.
     @Published var conversationState: ConversationState = .idle
+
+    /// Status string for the current state (header, accessibility). Derived from conversationState.
+    var statusText: String { ConversationState.statusText(for: conversationState) }
 
     /// Active child profile id; set by ContentView from ProfileManager. Backend uses this for isolated memory.
     /// When nil, we send "default" so the backend still works before any profile is added.
@@ -66,6 +73,8 @@ class ChatViewModel: ObservableObject {
     private var thinkingEndTime: Date?
     /// ID of the current streaming AI message so we can update it in place.
     private var streamingMessageId: UUID?
+    /// In-flight request task; cancelled when user leaves chat or profile changes.
+    private var currentRequestTask: Task<Void, Never>?
 
     /// Fun placeholder phrases while waiting for the reply (works for any message, not just questions).
     private static let thinkingPhrases = [
@@ -81,7 +90,9 @@ class ChatViewModel: ObservableObject {
 
     init() {
         speechManager.onDidFinishSpeaking = { [weak self] in
-            DispatchQueue.main.async { self?.conversationState = .idle }
+            Task { @MainActor in
+                self?.conversationState = .idle
+            }
         }
     }
 
@@ -96,6 +107,15 @@ class ChatViewModel: ObservableObject {
         conversationState = .idle
     }
 
+    /// Cancels any in-flight request and stops TTS. Call when the user leaves the chat (e.g. view disappears or profile switches).
+    func cancelRequest() {
+        currentRequestTask?.cancel()
+        currentRequestTask = nil
+        speechManager.stop()
+        if isLoading { isLoading = false }
+        if conversationState == .thinking || conversationState == .speaking { conversationState = .idle }
+    }
+
     // MARK: - Sending messages
 
     /// Sends the current input to the backend and appends the reply (or an error message).
@@ -106,6 +126,7 @@ class ChatViewModel: ObservableObject {
         // 1. Append user message and clear input
         let userMessage = ChatMessage(id: UUID(), text: text, isUser: true)
         messages.append(userMessage)
+        trimMessagesIfNeeded()
         inputText = ""
         isLoading = true
 
@@ -117,10 +138,12 @@ class ChatViewModel: ObservableObject {
         let placeholderId = UUID()
         streamingMessageId = placeholderId
         messages.append(ChatMessage(id: placeholderId, text: phrase, isUser: false))
+        trimMessagesIfNeeded()
 
         // 3. Send POST to streaming endpoint and consume SSE
-        Task {
+        currentRequestTask = Task {
             await performStreamingRequest(userMessageText: text, placeholderId: placeholderId)
+            currentRequestTask = nil
         }
     }
 
@@ -131,6 +154,8 @@ class ChatViewModel: ObservableObject {
             isLoading = false
             streamingMessageId = nil
         }
+
+        if Task.isCancelled { return }
 
         guard let url = ChatViewModel.streamURL else {
             replacePlaceholderAndShowError("Connection error. Please try again.")
@@ -162,6 +187,11 @@ class ChatViewModel: ObservableObject {
             var hasStartedSpeaking = false
             var lineBuffer: [UInt8] = []
             for try await byte in bytes {
+                if Task.isCancelled {
+                    removeThinkingPlaceholderIfNeeded()
+                    if let idx = messages.lastIndex(where: { $0.id == placeholderId }) { messages.remove(at: idx) }
+                    return
+                }
                 lineBuffer.append(byte)
                 if byte != 0x0A { continue }
                 guard let line = String(bytes: lineBuffer, encoding: .utf8) else { lineBuffer = []; continue }
@@ -185,8 +215,13 @@ class ChatViewModel: ObservableObject {
                         }
                     }
                 } else if event?.done == true, let reply = event?.reply {
-                    let remainder = reply.dropFirst(lastSpokenLength)
-                    if !remainder.isEmpty { speechManager.enqueueMore(String(remainder)) }
+                    // TTS remainder: what we haven't spoken from the stream, plus any tail the server sent only in done (e.g. Knowledge mode)
+                    let remainderFromStream = accumulated.dropFirst(lastSpokenLength)
+                    if !remainderFromStream.isEmpty { speechManager.enqueueMore(String(remainderFromStream)) }
+                    if reply.count > accumulated.count {
+                        let extraFromReply = reply.dropFirst(accumulated.count)
+                        if !extraFromReply.isEmpty { speechManager.enqueueMore(String(extraFromReply)) }
+                    }
                     if !hasStartedSpeaking { conversationState = .speaking }
                     replacePlaceholderWithFinalReply(placeholderId: placeholderId, replyText: reply, speak: false)
                     return
@@ -255,11 +290,12 @@ class ChatViewModel: ObservableObject {
         return "Connection error: \(error.localizedDescription)"
     }
 
-    /// Returns the next chunk of text that ends in a sentence or phrase boundary (. ! ? ,), and the end index in the full string.
+    /// Returns the next chunk of text that ends in a sentence boundary (. ! ?), and the end index.
+    /// We use only sentence boundaries (not comma) so TTS gets full sentences and we avoid splitting on phrases like "a country, a famous person".
     private func nextSpeakableChunk(_ full: String, from startIndex: Int) -> (String, Int)? {
         let after = full.dropFirst(startIndex)
         guard !after.isEmpty else { return nil }
-        let boundaries: [Character] = [".", "!", "?", ","]
+        let boundaries: [Character] = [".", "!", "?"]
         var lastOffset: Int?
         for b in boundaries {
             if let i = after.lastIndex(of: b) {
@@ -284,6 +320,7 @@ class ChatViewModel: ObservableObject {
         removeThinkingPlaceholderIfNeeded()
         guard let idx = messages.lastIndex(where: { $0.id == placeholderId }) else {
             messages.append(ChatMessage(id: UUID(), text: replyText, isUser: false))
+            trimMessagesIfNeeded()
             conversationState = .speaking
             if speak { speechManager.speak(replyText) }
             lastThinkingPlaceholderText = nil
@@ -302,6 +339,7 @@ class ChatViewModel: ObservableObject {
         guard let endTime = thinkingEndTime else {
             let errorMessage = ChatMessage(id: UUID(), text: errorText, isUser: false)
             messages.append(errorMessage)
+            trimMessagesIfNeeded()
             conversationState = .speaking
             speechManager.speak(errorText)
             return
@@ -311,6 +349,7 @@ class ChatViewModel: ObservableObject {
             self?.removeThinkingPlaceholderIfNeeded()
             let errorMessage = ChatMessage(id: UUID(), text: errorText, isUser: false)
             self?.messages.append(errorMessage)
+            self?.trimMessagesIfNeeded()
             self?.conversationState = .speaking
             self?.speechManager.speak(errorText)
             self?.lastThinkingPlaceholderText = nil
@@ -321,6 +360,13 @@ class ChatViewModel: ObservableObject {
     private func removeThinkingPlaceholderIfNeeded() {
         if let placeholder = lastThinkingPlaceholderText, messages.last?.text == placeholder {
             messages.removeLast()
+        }
+    }
+
+    /// Keeps only the last maxMessages to bound memory in long sessions.
+    private func trimMessagesIfNeeded() {
+        if messages.count > Self.maxMessages {
+            messages = Array(messages.suffix(Self.maxMessages))
         }
     }
 }

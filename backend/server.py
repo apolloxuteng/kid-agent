@@ -18,6 +18,7 @@ Folders are created automatically when a profile is first used. No database.
 import asyncio
 import copy
 import json
+import logging
 import os
 import re
 from contextlib import asynccontextmanager
@@ -30,6 +31,8 @@ import httpx
 # =============================================================================
 # 1. App and config
 # =============================================================================
+
+logger = logging.getLogger(__name__)
 
 # Ollama: shared async client created at startup, closed at shutdown
 _ollama_client: httpx.AsyncClient | None = None
@@ -61,12 +64,20 @@ _BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(_BACKEND_DIR, "data")
 PROFILES_ROOT = os.path.join(DATA_DIR, "profiles")
 
-# Conversation and profile limits
-RECENT_MESSAGES_COUNT = 6
-MAX_HISTORY_MESSAGES = 50
-MAX_INTERESTS = 10
-MAX_EXTRACTED_LENGTH = 80
-MAX_CACHED_PROFILES = 20
+
+def _env_int(key: str, default: int) -> int:
+    try:
+        return int(os.environ.get(key, default))
+    except ValueError:
+        return default
+
+
+# Conversation and profile limits (override via env)
+RECENT_MESSAGES_COUNT = _env_int("RECENT_MESSAGES_COUNT", 6)
+MAX_HISTORY_MESSAGES = _env_int("MAX_HISTORY_MESSAGES", 50)
+MAX_INTERESTS = _env_int("MAX_INTERESTS", 10)
+MAX_EXTRACTED_LENGTH = _env_int("MAX_EXTRACTED_LENGTH", 80)
+MAX_CACHED_PROFILES = _env_int("MAX_CACHED_PROFILES", 20)
 
 # In-memory caches for profile data (invalidated on write / reset)
 _profile_cache: dict[str, dict] = {}
@@ -138,16 +149,25 @@ def load_profile_json(profile_id: str) -> dict:
         return copy.deepcopy(out)
 
 
-def save_profile_json(profile_id: str, data: dict) -> None:
-    """Write profile.json for this profile and update cache."""
+def save_profile_json(profile_id: str, data: dict) -> bool:
+    """Write profile.json for this profile and update cache (atomic write). Returns True on success, False on write error (logged)."""
     _ensure_profile_dir(profile_id)
     path = _path(profile_id, "profile.json")
+    path_tmp = path + ".tmp"
     try:
-        with open(path, "w", encoding="utf-8") as f:
+        with open(path_tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+        os.replace(path_tmp, path)
         _profile_cache[profile_id] = copy.deepcopy(data)
-    except OSError:
-        pass
+        return True
+    except OSError as e:
+        logger.exception("Failed to save profile.json for profile_id=%s: %s", profile_id, e)
+        if os.path.isfile(path_tmp):
+            try:
+                os.remove(path_tmp)
+            except OSError:
+                pass
+        return False
 
 
 def load_summary(profile_id: str) -> str:
@@ -171,16 +191,25 @@ def load_summary(profile_id: str) -> str:
         return ""
 
 
-def save_summary(profile_id: str, text: str) -> None:
-    """Write summary.txt for this profile and update cache."""
+def save_summary(profile_id: str, text: str) -> bool:
+    """Write summary.txt for this profile and update cache (atomic write). Returns True on success, False on write error (logged)."""
     _ensure_profile_dir(profile_id)
     path = _path(profile_id, "summary.txt")
+    path_tmp = path + ".tmp"
     try:
-        with open(path, "w", encoding="utf-8") as f:
+        with open(path_tmp, "w", encoding="utf-8") as f:
             f.write(text)
+        os.replace(path_tmp, path)
         _summary_cache[profile_id] = text
-    except OSError:
-        pass
+        return True
+    except OSError as e:
+        logger.exception("Failed to save summary.txt for profile_id=%s: %s", profile_id, e)
+        if os.path.isfile(path_tmp):
+            try:
+                os.remove(path_tmp)
+            except OSError:
+                pass
+        return False
 
 
 def load_history(profile_id: str) -> list[dict]:
@@ -208,16 +237,25 @@ def load_history(profile_id: str) -> list[dict]:
         return []
 
 
-def save_history(profile_id: str, history: list[dict]) -> None:
-    """Write history.json for this profile and update cache."""
+def save_history(profile_id: str, history: list[dict]) -> bool:
+    """Write history.json for this profile and update cache (atomic write). Returns True on success, False on write error (logged)."""
     _ensure_profile_dir(profile_id)
     path = _path(profile_id, "history.json")
+    path_tmp = path + ".tmp"
     try:
-        with open(path, "w", encoding="utf-8") as f:
+        with open(path_tmp, "w", encoding="utf-8") as f:
             json.dump(history, f, indent=2)
+        os.replace(path_tmp, path)
         _history_cache[profile_id] = copy.deepcopy(history)
-    except OSError:
-        pass
+        return True
+    except OSError as e:
+        logger.exception("Failed to save history.json for profile_id=%s: %s", profile_id, e)
+        if os.path.isfile(path_tmp):
+            try:
+                os.remove(path_tmp)
+            except OSError:
+                pass
+        return False
 
 
 def trim_history(history: list[dict]) -> list[dict]:
@@ -306,10 +344,10 @@ def get_system_prompt(profile: dict) -> str:
     return out
 
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL_NAME = "qwen2.5"
-OLLAMA_CHAT_TIMEOUT = 60
-OLLAMA_SUMMARY_TIMEOUT = 30
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
+MODEL_NAME = os.environ.get("MODEL_NAME", "qwen2.5")
+OLLAMA_CHAT_TIMEOUT = _env_int("OLLAMA_CHAT_TIMEOUT", 60)
+OLLAMA_SUMMARY_TIMEOUT = _env_int("OLLAMA_SUMMARY_TIMEOUT", 30)
 
 
 async def _call_ollama(prompt: str, timeout: int = 30, raise_on_error: bool = False) -> str:
@@ -440,7 +478,8 @@ def build_prompt(profile: dict, conversation_summary: str, conversation_history:
 async def _run_summary_in_background(profile_id: str, history: list[dict], old_summary: str) -> None:
     """Background task: compute new summary and save to disk. Does not block the response."""
     new_summary = await update_summary(history, old_summary)
-    await asyncio.to_thread(save_summary, profile_id, new_summary)
+    if not await asyncio.to_thread(save_summary, profile_id, new_summary):
+        logger.warning("Background save_summary failed for profile_id=%s", profile_id)
 
 
 @app.post("/chat")
@@ -468,7 +507,8 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
 
     # Update profile from message and persist
     profile = update_profile_from_message(profile, user_message)
-    await asyncio.to_thread(save_profile_json, profile_id, profile)
+    if not await asyncio.to_thread(save_profile_json, profile_id, profile):
+        raise HTTPException(status_code=503, detail="Failed to save profile.")
 
     # Add user message and trim
     conversation_history.append({"role": "user", "content": user_message})
@@ -497,7 +537,8 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
             list(conversation_history),  # copy so background task has exact state
             conversation_summary,
         )
-    await asyncio.to_thread(save_history, profile_id, conversation_history)
+    if not await asyncio.to_thread(save_history, profile_id, conversation_history):
+        raise HTTPException(status_code=503, detail="Failed to save conversation.")
 
     return {"reply": llm_reply}
 
@@ -509,7 +550,8 @@ async def _stream_chat_sse(
     conversation_history: list[dict],
     background_tasks: BackgroundTasks,
 ):
-    """Async generator: stream Ollama tokens as SSE; on completion append reply to history and save."""
+    """Async generator: stream Ollama tokens as SSE; on completion append reply to history and save.
+    Cache consistency: _history_cache is updated only inside save_history() on success; on save failure we pop(profile_id) so the next load reads from disk."""
     full_reply_parts: list[str] = []
     try:
         if _ollama_client is None:
@@ -548,12 +590,16 @@ async def _stream_chat_sse(
                 list(trimmed),
                 conversation_summary,
             )
-        await asyncio.to_thread(save_history, profile_id, trimmed)
+        if not await asyncio.to_thread(save_history, profile_id, trimmed):
+            _history_cache.pop(profile_id, None)
+            yield f"data: {json.dumps({'error': 'Failed to save conversation.'})}\n\n"
+            return
         yield f"data: {json.dumps({'done': True, 'reply': llm_reply})}\n\n"
     except Exception as e:
         if conversation_history and conversation_history[-1]["role"] == "user":
             conversation_history.pop()
-        await asyncio.to_thread(save_history, profile_id, conversation_history)
+        if not await asyncio.to_thread(save_history, profile_id, conversation_history):
+            _history_cache.pop(profile_id, None)
         yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
 
@@ -602,7 +648,8 @@ async def reset_profile(profile_id: str):
     """Clears the child profile (name and interests) for this profile_id and saves to file."""
     _validate_profile_id(profile_id)
     await asyncio.to_thread(_ensure_profile_dir, profile_id)
-    await asyncio.to_thread(save_profile_json, profile_id, {"name": None, "interests": []})
+    if not await asyncio.to_thread(save_profile_json, profile_id, {"name": None, "interests": []}):
+        raise HTTPException(status_code=503, detail="Failed to save profile.")
     return {"status": "profile cleared"}
 
 
@@ -611,8 +658,10 @@ async def reset(profile_id: str):
     """Clears conversation history and summary for this profile_id only."""
     _validate_profile_id(profile_id)
     await asyncio.to_thread(_ensure_profile_dir, profile_id)
-    await asyncio.to_thread(save_summary, profile_id, "")
-    await asyncio.to_thread(save_history, profile_id, [])
+    if not await asyncio.to_thread(save_summary, profile_id, ""):
+        raise HTTPException(status_code=503, detail="Failed to save.")
+    if not await asyncio.to_thread(save_history, profile_id, []):
+        raise HTTPException(status_code=503, detail="Failed to save.")
     return {"status": "memory cleared"}
 
 

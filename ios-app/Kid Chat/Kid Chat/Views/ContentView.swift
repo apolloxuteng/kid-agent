@@ -14,10 +14,9 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var profileManager: ProfileManager
     @State private var appMode: AppMode = .selectProfile
-    /// When user taps "Tell me a story", we send this once when chat appears so the LLM starts with a story.
+    /// When user picks a greeting mode, we may send a starter message once when chat appears (story/knowledge/joke); question mode has no auto-send.
     @State private var pendingStarter: GreetingStarter?
     @StateObject private var viewModel = ChatViewModel()
-    @StateObject private var conversationViewModel = ConversationViewModel()
     @StateObject private var speechRecognizer = SpeechRecognizer()
     /// When true, the profile picker sheet is presented (triggered by tapping avatar in header).
     @State private var showProfilePicker = false
@@ -46,6 +45,16 @@ struct ContentView: View {
         }
     }
 
+    /// Returns to the mode-selection screen and restarts the conversation (clears messages and state).
+    private func goBackToModeSelection() {
+        viewModel.cancelRequest()
+        viewModel.messages = []
+        viewModel.inputText = ""
+        viewModel.isLoading = false
+        viewModel.setConversationState(.idle)
+        appMode = .greeting
+    }
+
     /// Chat UI: header, messages, input bar, mic. Shown when appMode == .chatting.
     private var chatView: some View {
         NavigationStack {
@@ -58,12 +67,27 @@ struct ContentView: View {
                 )
                 .ignoresSafeArea()
 
-                // Main content: header, messages, input bar (mic is overlaid below so conversation gets more space)
+                // Main content: back bar, header, messages, input bar (mic is overlaid below)
                 VStack(spacing: 0) {
-                    CharacterHeaderView(conversationViewModel: conversationViewModel, onAvatarTap: {
+                    // Back to mode selection; restarts conversation when user returns to chat
+                    HStack {
+                        Button(action: goBackToModeSelection) {
+                            Label("Mode", systemImage: "chevron.left")
+                                .font(.system(size: 16, weight: .medium, design: .rounded))
+                                .foregroundStyle(KidTheme.bubbleTextAI)
+                        }
+                        .accessibilityLabel("Back to mode selection")
+                        .accessibilityHint("Returns to choose Story, Knowledge, Question, or Joke mode and starts a new conversation")
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 4)
+                    .padding(.top, 8)
+                    .padding(.bottom, 2)
+
+                    CharacterHeaderView(conversationState: viewModel.conversationState, statusText: viewModel.statusText, onAvatarTap: {
                         showProfilePicker = true
                     })
-                    .padding(.top, 8)
+                    .padding(.top, 4)
                     .padding(.bottom, 4)
 
                     ScrollViewReader { proxy in
@@ -104,26 +128,37 @@ struct ContentView: View {
             }
             .navigationBarTitleDisplayMode(.inline)
             .navigationBarHidden(true)
-            .onChange(of: viewModel.conversationState) { newState in
-                conversationViewModel.state = newState
-            }
             .onChange(of: profileManager.activeProfile?.id) { _ in
+                viewModel.cancelRequest()
                 viewModel.activeProfileId = profileManager.activeProfile?.id
                 // Switching profile resets chat UI so each child gets a fresh conversation.
                 viewModel.messages = []
                 viewModel.inputText = ""
                 viewModel.isLoading = false
                 viewModel.setConversationState(.idle)
-                conversationViewModel.state = .idle
+            }
+            .onDisappear {
+                viewModel.cancelRequest()
             }
             .sheet(isPresented: $showProfilePicker) {
                 ProfilePickerView()
             }
             .onAppear {
                 viewModel.activeProfileId = profileManager.activeProfile?.id
-                if pendingStarter == .story {
-                    viewModel.inputText = "Tell me a funny story"
-                    viewModel.sendMessage()
+                if let starter = pendingStarter {
+                    switch starter {
+                    case .story:
+                        viewModel.inputText = "Tell me a funny story"
+                        viewModel.sendMessage()
+                    case .knowledge:
+                        viewModel.inputText = "Introduce me to something interesting from the world—a country, a famous person, or a cool place."
+                        viewModel.sendMessage()
+                    case .question:
+                        break // Kid asks questions; no auto-send
+                    case .joke:
+                        viewModel.inputText = "Tell me a funny joke"
+                        viewModel.sendMessage()
+                    }
                     pendingStarter = nil
                 }
             }
@@ -165,10 +200,8 @@ struct ContentView: View {
                     if isRecording {
                         viewModel.inputText = speechRecognizer.transcript
                         viewModel.setConversationState(.listening)
-                        conversationViewModel.state = .listening
                     } else {
                         viewModel.setConversationState(.idle)
-                        conversationViewModel.state = .idle
                         // Auto-send when user finishes talking (voice input only; manual typing still uses Send)
                         let text = viewModel.inputText.trimmingCharacters(in: .whitespacesAndNewlines)
                         if !text.isEmpty {
@@ -189,10 +222,12 @@ struct ContentView: View {
                     .font(.system(size: 36))
                     .foregroundStyle(KidTheme.micIdle)
             }
+            .accessibilityLabel("Send message")
+            .accessibilityHint("Sends your message to the assistant")
             .disabled(
                 viewModel.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || viewModel.isLoading
-                || conversationViewModel.state == .speaking
+                || viewModel.conversationState == .speaking
             )
         }
         .padding(.horizontal, 16)
@@ -235,38 +270,18 @@ struct ContentView: View {
     // MARK: - Floating mic (large tap target, state-based color)
 
     private var micButton: some View {
-        LargeMicButton(state: conversationViewModel.state, onTap: {
+        LargeMicButton(state: viewModel.conversationState, onTap: {
             // If agent is speaking, tap stops TTS (useful for long replies)
-            if conversationViewModel.state == .speaking {
+            if viewModel.conversationState == .speaking {
                 viewModel.stopSpeaking()
-                conversationViewModel.state = .idle
                 return
             }
             if !speechRecognizer.isRecording {
-                conversationViewModel.state = .listening
                 viewModel.setConversationState(.listening)
             }
             speechRecognizer.toggleRecording()
         })
             .disabled(viewModel.isLoading)
-    }
-}
-
-// MARK: - Thinking dots (● ○ ○ → ○ ● ○ → ○ ○ ●), cycles every 0.4s
-
-private struct ThinkingDotsView: View {
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 0.4)) { context in
-            let step = Int(context.date.timeIntervalSinceReferenceDate / 0.4) % 3
-            HStack(spacing: 6) {
-                ForEach(0..<3, id: \.self) { i in
-                    Circle()
-                        .fill(i == step ? KidTheme.bubbleTextAI : KidTheme.bubbleTextAI.opacity(0.3))
-                        .frame(width: 8, height: 8)
-                }
-            }
-        }
-        .font(.system(size: 16, weight: .medium, design: .rounded))
     }
 }
 
@@ -349,6 +364,8 @@ struct MessageBubble: View {
 
             bubbleContent
                 .modifier(ExcitedPulseModifier(apply: !message.isUser && bubbleStyle == .excited))
+                .accessibilityLabel(message.isUser ? "You said: \(message.text)" : "Reply: \(message.text)")
+                .accessibilityHint("Message in the conversation")
 
             if !message.isUser { Spacer(minLength: 32) }
         }

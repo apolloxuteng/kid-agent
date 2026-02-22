@@ -11,12 +11,14 @@ import SwiftUI
 
 // MARK: - Character header
 
-/// A centered header showing an avatar, character name, and status from ConversationViewModel.
+/// A centered header showing an avatar, character name, and status. State comes from ChatViewModel (single source of truth).
 /// Avatar and name come from the active child profile (ProfileManager); tap avatar to switch profiles.
 struct CharacterHeaderView: View {
     @EnvironmentObject private var profileManager: ProfileManager
-    @ObservedObject var conversationViewModel: ConversationViewModel
-
+    /// Current conversation state (idle / listening / thinking / speaking).
+    var conversationState: ConversationState
+    /// Status string to display (e.g. "Ready to chat!", "Thinking...").
+    var statusText: String
     /// Called when the user taps the avatar; ContentView uses this to present the profile picker sheet.
     var onAvatarTap: () -> Void = {}
 
@@ -41,16 +43,27 @@ struct CharacterHeaderView: View {
                 avatarView
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("\(characterName) avatar")
+            .accessibilityHint("Opens profile picker to switch child")
 
             // Character name: rounded, bold, friendly
             Text(characterName)
                 .font(.system(size: 24, weight: .bold, design: .rounded))
                 .foregroundStyle(KidTheme.bubbleTextAI)
 
-            // Status text from ConversationViewModel; color depends on state
-            Text(conversationViewModel.statusText)
-                .font(.system(size: 16, weight: .medium, design: .rounded))
-                .foregroundStyle(statusColor)
+            // Status: when thinking, show animated dots; otherwise show status text
+            Group {
+                if conversationState == .thinking {
+                    ThinkingDotsView()
+                } else {
+                    Text(statusText)
+                        .font(.system(size: 16, weight: .medium, design: .rounded))
+                        .foregroundStyle(statusColor)
+                }
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(statusText)
+            .accessibilityHint("Updates frequently")
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 12)
@@ -61,14 +74,14 @@ struct CharacterHeaderView: View {
                 endPoint: .bottom
             )
         )
-        .animation(.easeInOut(duration: 0.3), value: conversationViewModel.state)
+        .animation(.easeInOut(duration: 0.3), value: conversationState)
     }
 
     // MARK: - Avatar (emoji + circle + shadow; idle = gentle breathing scale)
 
     private var avatarView: some View {
         Group {
-            if conversationViewModel.state == .idle {
+            if conversationState == .idle {
                 TimelineView(.animation(minimumInterval: 0.033)) { context in
                     let t = context.date.timeIntervalSinceReferenceDate
                     let scale = 1.0 + 0.025 * (1 + cos(.pi * t))
@@ -77,7 +90,7 @@ struct CharacterHeaderView: View {
             } else {
                 avatarBody
                     .scaleEffect(1.04)
-                    .animation(.easeInOut(duration: 0.3), value: conversationViewModel.state)
+                    .animation(.easeInOut(duration: 0.3), value: conversationState)
             }
         }
     }
@@ -93,7 +106,7 @@ struct CharacterHeaderView: View {
 
     /// Status text color by state: idle = gray, listening = red, thinking = orange, speaking = purple.
     private var statusColor: Color {
-        switch conversationViewModel.state {
+        switch conversationState {
         case .idle: return .gray
         case .listening: return .red
         case .thinking: return .orange
@@ -105,7 +118,7 @@ struct CharacterHeaderView: View {
 // MARK: - Preview
 
 #Preview {
-    CharacterHeaderView(conversationViewModel: ConversationViewModel())
+    CharacterHeaderView(conversationState: .idle, statusText: ConversationState.statusText(for: .idle))
         .environmentObject(ProfileManager())
         .padding()
 }
