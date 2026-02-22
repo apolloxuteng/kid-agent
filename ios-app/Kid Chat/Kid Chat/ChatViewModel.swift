@@ -53,11 +53,16 @@ class ChatViewModel: ObservableObject {
     /// When to show the reply (so we never respond instantly; calmer for kids).
     private var thinkingEndTime: Date?
 
-    /// Friendly phrases shown while waiting. Random choice feels more natural.
+    /// Fun placeholder phrases while waiting for the reply (works for any message, not just questions).
     private static let thinkingPhrases = [
-        "Let me think...",
-        "Hmm...",
-        "That's a good question!"
+        "Ooh, let me think...",
+        "Hang on a sec...",
+        "Thinking really hard...",
+        "One moment...",
+        "So many ideas...",
+        "Almost there...",
+        "Let me figure that out...",
+        "Ooh, I'm thinking...",
     ]
 
     init() {
@@ -69,6 +74,12 @@ class ChatViewModel: ObservableObject {
     /// Called by the view when the mic starts or stops (so we can show "Listening...").
     func setConversationState(_ state: ConversationState) {
         conversationState = state
+    }
+
+    /// Stops TTS immediately. Call when the user taps the mic during speaking to cut off long replies.
+    func stopSpeaking() {
+        speechManager.stop()
+        conversationState = .idle
     }
 
     // MARK: - Sending messages
@@ -86,7 +97,7 @@ class ChatViewModel: ObservableObject {
 
         // 2. Show thinking state: placeholder message + minimum delay so it never feels instant
         conversationState = .thinking
-        let phrase = ChatViewModel.thinkingPhrases.randomElement() ?? "Let me think..."
+        let phrase = ChatViewModel.thinkingPhrases.randomElement() ?? "Ooh, let me think..."
         lastThinkingPlaceholderText = phrase
         thinkingEndTime = Date().addingTimeInterval(Double.random(in: 0.8...1.2))
         messages.append(ChatMessage(id: UUID(), text: phrase, isUser: false))

@@ -15,6 +15,7 @@ import SwiftUI
 struct ProfileSelectionView: View {
     @EnvironmentObject private var profileManager: ProfileManager
     @State private var showAddProfile = false
+    @State private var profileToEdit: ChildProfile?
 
     /// Called when the user taps Continue; move to greeting (or chat).
     var onContinue: () -> Void
@@ -85,6 +86,11 @@ struct ProfileSelectionView: View {
                 showAddProfile = false
             }
         }
+        .sheet(item: $profileToEdit) { profile in
+            EditProfileView(profile: profile, profileManager: profileManager) {
+                profileToEdit = nil
+            }
+        }
     }
 
     /// Shown when there are no profiles yet.
@@ -115,40 +121,51 @@ struct ProfileSelectionView: View {
 
     private func profileRow(_ profile: ChildProfile) -> some View {
         let isActive = profileManager.activeProfile?.id == profile.id
-        return Button {
-            profileManager.switchProfile(id: profile.id)
-        } label: {
-            HStack(spacing: 16) {
-                Text(profile.avatar)
-                    .font(.system(size: 44))
-                    .frame(width: 56, height: 56)
-                    .background(Circle().fill(Color.white.opacity(0.9)))
-                    .shadow(color: .black.opacity(0.08), radius: 4, x: 0, y: 2)
+        return HStack(spacing: 12) {
+            Button {
+                profileManager.switchProfile(id: profile.id)
+            } label: {
+                HStack(spacing: 16) {
+                    Text(profile.avatar)
+                        .font(.system(size: 44))
+                        .frame(width: 56, height: 56)
+                        .background(Circle().fill(Color.white.opacity(0.9)))
+                        .shadow(color: .black.opacity(0.08), radius: 4, x: 0, y: 2)
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(profile.name)
-                        .font(.system(size: 20, weight: .semibold, design: .rounded))
-                        .foregroundStyle(KidTheme.bubbleTextAI)
-                    Text("Age \(profile.age)")
-                        .font(.system(size: 15, weight: .medium, design: .rounded))
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(profile.name)
+                            .font(.system(size: 20, weight: .semibold, design: .rounded))
+                            .foregroundStyle(KidTheme.bubbleTextAI)
+                        Text("Age \(profile.age)")
+                            .font(.system(size: 15, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
-                if isActive {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(KidTheme.micIdle)
-                        .font(.system(size: 22))
+                    if isActive {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(KidTheme.micIdle)
+                            .font(.system(size: 22))
+                    }
                 }
+                .padding(.vertical, 12)
+                .padding(.horizontal, 16)
+                .background(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(isActive ? KidTheme.micIdle.opacity(0.15) : Color.white.opacity(0.6))
+                )
             }
-            .padding(.vertical, 12)
-            .padding(.horizontal, 16)
-            .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(isActive ? KidTheme.micIdle.opacity(0.15) : Color.white.opacity(0.6))
-            )
+            .buttonStyle(.plain)
+
+            Button {
+                profileToEdit = profile
+            } label: {
+                Image(systemName: "pencil.circle.fill")
+                    .font(.system(size: 28))
+                    .foregroundStyle(KidTheme.micIdle)
+            }
+            .buttonStyle(.plain)
         }
-        .buttonStyle(.plain)
         .padding(.bottom, 10)
     }
 

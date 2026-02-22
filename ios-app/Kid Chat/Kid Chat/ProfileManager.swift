@@ -92,6 +92,17 @@ class ProfileManager: ObservableObject {
         return true
     }
 
+    /// Updates an existing profile by id (name, age, interests, avatar). Keeps the same id.
+    /// If the updated profile is the active one, refreshes activeProfile so the UI shows the new data.
+    func updateProfile(_ profile: ChildProfile) {
+        guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
+        profiles[index] = profile
+        if activeProfile?.id == profile.id {
+            activeProfile = profile
+        }
+        saveProfiles()
+    }
+
     /// Switches the active profile to the one with the given id.
     /// Does nothing if no profile has that id. Caller (e.g. ContentView) should reset chat state.
     /// - Parameter id: The UUID of the profile to make active.

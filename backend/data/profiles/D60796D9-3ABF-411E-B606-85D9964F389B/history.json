@@ -6,5 +6,29 @@
   {
     "role": "assistant",
     "content": "That's awesome, Gerald! Dogs are so cute and friendly. Do you have a favorite dog at home?"
+  },
+  {
+    "role": "user",
+    "content": "Tell me a short story"
+  },
+  {
+    "role": "assistant",
+    "content": "Sure! Once upon a time, in a village far away, there was a fluffy puppy named Buddy."
+  },
+  {
+    "role": "user",
+    "content": "Tell me a short story"
+  },
+  {
+    "role": "assistant",
+    "content": "Once upon a time, there were two dogs playing in the park."
+  },
+  {
+    "role": "user",
+    "content": "I want to talk now"
+  },
+  {
+    "role": "assistant",
+    "content": "That sounds great, Gerald! What would you like to talk about with your favorite dog?"
   }
 ]

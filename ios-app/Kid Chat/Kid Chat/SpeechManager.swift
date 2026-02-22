@@ -39,9 +39,13 @@ final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
 
     /// Speaks the given text. Splits into sentences and speaks them sequentially
     /// with emotional variation. Stops any current speech first.
+    /// Emojis and punctuation are stripped before speaking so TTS doesn't read them aloud.
     func speak(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+
+        // Strip emojis so TTS doesn't read them; keep punctuation for sentence splitting
+        let textNoEmoji = stripEmojis(trimmed)
 
         // Configure audio session for playback (needed so iPad/speaker output works after mic use)
         let session = AVAudioSession.sharedInstance()
@@ -56,7 +60,7 @@ final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
             synthesizer.stopSpeaking(at: .immediate)
         }
 
-        let sentences = splitIntoSentences(trimmed)
+        let sentences = splitIntoSentences(textNoEmoji)
         sentenceQueue = sentences.map { sentence in
             utterance(for: sentence)
         }
@@ -75,9 +79,32 @@ final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
         sentenceQueue.removeAll()
     }
 
+    // MARK: - TTS text cleanup (omit emojis and punctuation from being read aloud)
+
+    /// Removes emoji characters (Unicode emoji property) so TTS doesn't read them.
+    private func stripEmojis(_ text: String) -> String {
+        text.filter { char in
+            !char.unicodeScalars.contains { scalar in
+                scalar.properties.isEmoji
+            }
+        }
+    }
+
+    /// Removes punctuation and collapses multiple spaces so TTS only speaks words.
+    private func stripPunctuation(_ text: String) -> String {
+        let withSpaces = text.unicodeScalars
+            .map { CharacterSet.punctuationCharacters.contains($0) ? " " : String($0) }
+            .joined()
+        return withSpaces
+            .split(separator: " ", omittingEmptySubsequences: true)
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     // MARK: - Sentence splitting
 
     /// Splits text into sentences (by . ! ?). Single sentence or no delimiter → one element.
+    /// Called after stripEmojis so sentences still split correctly; then we strip punctuation per utterance.
     private func splitIntoSentences(_ text: String) -> [String] {
         var results: [String] = []
         var current = ""
@@ -98,8 +125,10 @@ final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
 
     /// Builds an AVSpeechUtterance for one sentence with rate/pitch/voice.
     /// Applies simple emotional variation: exclamation → higher pitch, question → slightly slower.
+    /// Punctuation is stripped from the spoken string so TTS doesn't read it aloud.
     private func utterance(for sentence: String) -> AVSpeechUtterance {
-        let utterance = AVSpeechUtterance(string: sentence)
+        let spokenText = stripPunctuation(sentence)
+        let utterance = AVSpeechUtterance(string: spokenText.isEmpty ? sentence : spokenText)
         utterance.voice = preferredVoice()
         utterance.volume = 0.9
 

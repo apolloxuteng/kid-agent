@@ -122,7 +122,7 @@ struct ContentView: View {
             .onAppear {
                 viewModel.activeProfileId = profileManager.activeProfile?.id
                 if pendingStarter == .story {
-                    viewModel.inputText = "Tell me a short story"
+                    viewModel.inputText = "Tell me a funny story"
                     viewModel.sendMessage()
                     pendingStarter = nil
                 }
@@ -216,13 +216,19 @@ struct ContentView: View {
 
     private var micButton: some View {
         LargeMicButton(state: conversationViewModel.state, onTap: {
+            // If agent is speaking, tap stops TTS (useful for long replies)
+            if conversationViewModel.state == .speaking {
+                viewModel.stopSpeaking()
+                conversationViewModel.state = .idle
+                return
+            }
             if !speechRecognizer.isRecording {
                 conversationViewModel.state = .listening
                 viewModel.setConversationState(.listening)
             }
             speechRecognizer.toggleRecording()
         })
-            .disabled(viewModel.isLoading || conversationViewModel.state == .speaking)
+            .disabled(viewModel.isLoading)
     }
 }
 
