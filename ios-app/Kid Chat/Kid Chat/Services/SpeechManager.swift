@@ -32,6 +32,20 @@ final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
     /// Called when all sentences have finished (so UI can set conversationState = .idle).
     var onDidFinishSpeaking: (() -> Void)?
 
+    /// When true, speak and enqueueMore do nothing; keeps state consistent (stops and clears queue when muting).
+    var isMuted: Bool = false
+    /// When set, used for all new utterances; nil means use preferredVoice().
+    var selectedVoice: AVSpeechSynthesisVoice?
+
+    /// Sets the voice by identifier. Pass nil to use the default preferred voice.
+    func setSelectedVoice(identifier: String?) {
+        if let id = identifier, !id.isEmpty {
+            selectedVoice = AVSpeechSynthesisVoice(identifier: id)
+        } else {
+            selectedVoice = nil
+        }
+    }
+
     override init() {
         synthesizer = AVSpeechSynthesizer()
         super.init()
@@ -48,6 +62,11 @@ final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
     }
 
     private func _speak(_ text: String) {
+        if isMuted {
+            synthesizer.stopSpeaking(at: .immediate)
+            sentenceQueue.removeAll()
+            return
+        }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
@@ -79,6 +98,7 @@ final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
     }
 
     private func _enqueueMore(_ text: String) {
+        if isMuted { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
@@ -195,7 +215,7 @@ final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
     private func utterance(for sentence: String) -> AVSpeechUtterance {
         let spokenText = stripPunctuation(sentence)
         let utterance = AVSpeechUtterance(string: spokenText.isEmpty ? sentence : spokenText)
-        utterance.voice = preferredVoice()
+        utterance.voice = selectedVoice ?? preferredVoice()
         utterance.volume = 0.9
 
         let trimmed = sentence.trimmingCharacters(in: .whitespaces)

@@ -13,6 +13,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var profileManager: ProfileManager
+    @EnvironmentObject private var conversationSettings: ConversationSettings
     @State private var appMode: AppMode = .selectProfile
     /// When user picks a greeting mode, we may send a starter message once when chat appears (story/knowledge/joke); question mode has no auto-send.
     @State private var pendingStarter: GreetingStarter?
@@ -20,6 +21,8 @@ struct ContentView: View {
     @StateObject private var speechRecognizer = SpeechRecognizer()
     /// When true, the profile picker sheet is presented (triggered by tapping avatar in header).
     @State private var showProfilePicker = false
+    /// When true, the conversation settings sheet is presented (voice, mute, background).
+    @State private var showSettings = false
     /// When non-nil, show this emoji floating up from bottom center; one per last AI message.
     @State private var floatingEmoji: String? = nil
     /// Avoid re-triggering animation for the same message.
@@ -59,17 +62,13 @@ struct ContentView: View {
     private var chatView: some View {
         NavigationStack {
             ZStack(alignment: .bottom) {
-                // Soft gradient background for entire screen
-                LinearGradient(
-                    colors: [KidTheme.backgroundTop, KidTheme.backgroundBottom],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .ignoresSafeArea()
+                // Gradient background from conversation settings (pastel blue, lavender, mint, etc.)
+                conversationSettings.conversationGradient
+                    .ignoresSafeArea()
 
                 // Main content: back bar, header, messages, input bar (mic is overlaid below)
                 VStack(spacing: 0) {
-                    // Back to mode selection; restarts conversation when user returns to chat
+                    // Back to mode selection (left); Settings (right)
                     HStack {
                         Button(action: goBackToModeSelection) {
                             Label("Mode", systemImage: "chevron.left")
@@ -79,6 +78,13 @@ struct ContentView: View {
                         .accessibilityLabel("Back to mode selection")
                         .accessibilityHint("Returns to choose Story, Knowledge, Question, or Joke mode and starts a new conversation")
                         Spacer(minLength: 0)
+                        Button(action: { showSettings = true }) {
+                            Image(systemName: "gearshape")
+                                .font(.system(size: 20, weight: .medium))
+                                .foregroundStyle(KidTheme.bubbleTextAI)
+                        }
+                        .accessibilityLabel("Settings")
+                        .accessibilityHint("Voice, mute, and background options")
                     }
                     .padding(.horizontal, 4)
                     .padding(.top, 8)
@@ -86,7 +92,7 @@ struct ContentView: View {
 
                     CharacterHeaderView(conversationState: viewModel.conversationState, statusText: viewModel.statusText, onAvatarTap: {
                         showProfilePicker = true
-                    })
+                    }, backgroundGradient: conversationSettings.conversationGradient)
                     .padding(.top, 4)
                     .padding(.bottom, 4)
 
@@ -100,6 +106,12 @@ struct ContentView: View {
                                 withAnimation(.easeOut(duration: 0.35)) {
                                     proxy.scrollTo(last.id, anchor: .bottom)
                                 }
+                            }
+                        }
+                        .onChange(of: viewModel.messages.last?.text) { _ in
+                            // During streaming we update the same message in place; scroll so the latest text stays visible
+                            if let last = viewModel.messages.last {
+                                proxy.scrollTo(last.id, anchor: .bottom)
                             }
                         }
                     }
@@ -137,13 +149,23 @@ struct ContentView: View {
                 viewModel.isLoading = false
                 viewModel.setConversationState(.idle)
             }
+            .onChange(of: conversationSettings.selectedVoiceIdentifier) { _ in
+                viewModel.updateVoiceAndMute(voiceIdentifier: conversationSettings.selectedVoiceIdentifier, muted: conversationSettings.isAgentMuted)
+            }
+            .onChange(of: conversationSettings.isAgentMuted) { _ in
+                viewModel.updateVoiceAndMute(voiceIdentifier: conversationSettings.selectedVoiceIdentifier, muted: conversationSettings.isAgentMuted)
+            }
             .onDisappear {
                 viewModel.cancelRequest()
             }
             .sheet(isPresented: $showProfilePicker) {
                 ProfilePickerView()
             }
+            .sheet(isPresented: $showSettings) {
+                ConversationSettingsView(settings: conversationSettings)
+            }
             .onAppear {
+                viewModel.updateVoiceAndMute(voiceIdentifier: conversationSettings.selectedVoiceIdentifier, muted: conversationSettings.isAgentMuted)
                 viewModel.activeProfileId = profileManager.activeProfile?.id
                 if let starter = pendingStarter {
                     switch starter {
@@ -428,4 +450,5 @@ private struct BottomScrollAnchorModifier: ViewModifier {
 #Preview {
     ContentView()
         .environmentObject(ProfileManager())
+        .environmentObject(ConversationSettings())
 }

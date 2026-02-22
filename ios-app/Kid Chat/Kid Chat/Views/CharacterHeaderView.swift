@@ -21,6 +21,8 @@ struct CharacterHeaderView: View {
     var statusText: String
     /// Called when the user taps the avatar; ContentView uses this to present the profile picker sheet.
     var onAvatarTap: () -> Void = {}
+    /// When provided, used for the header background; nil = KidTheme gradient.
+    var backgroundGradient: LinearGradient?
 
     /// Emoji for avatar: active profile's or default Astro Buddy.
     private var avatarEmoji: String {
@@ -68,7 +70,7 @@ struct CharacterHeaderView: View {
         .frame(maxWidth: .infinity)
         .padding(.vertical, 12)
         .background(
-            LinearGradient(
+            backgroundGradient ?? LinearGradient(
                 colors: [KidTheme.backgroundTop, KidTheme.backgroundBottom],
                 startPoint: .top,
                 endPoint: .bottom
@@ -118,7 +120,7 @@ struct CharacterHeaderView: View {
 // MARK: - Preview
 
 #Preview {
-    CharacterHeaderView(conversationState: .idle, statusText: ConversationState.statusText(for: .idle))
+    CharacterHeaderView(conversationState: .idle, statusText: ConversationState.statusText(for: .idle), backgroundGradient: nil)
         .environmentObject(ProfileManager())
         .padding()
 }

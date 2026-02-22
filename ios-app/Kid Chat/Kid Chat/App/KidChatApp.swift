@@ -12,11 +12,14 @@ import SwiftUI
 struct KidChatApp: App {
     /// Single source of truth for child profiles; created once and passed down.
     @StateObject private var profileManager = ProfileManager()
+    /// Conversation page preferences: voice, mute, background. Persisted in UserDefaults.
+    @StateObject private var conversationSettings = ConversationSettings()
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(profileManager)
+                .environmentObject(conversationSettings)
         }
     }
 }

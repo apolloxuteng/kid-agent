@@ -116,6 +116,16 @@ class ChatViewModel: ObservableObject {
         if conversationState == .thinking || conversationState == .speaking { conversationState = .idle }
     }
 
+    /// Applies conversation settings to TTS. Call when the settings sheet appears or when voice/mute changes.
+    func updateVoiceAndMute(voiceIdentifier: String?, muted: Bool) {
+        speechManager.isMuted = muted
+        speechManager.setSelectedVoice(identifier: voiceIdentifier)
+        if muted {
+            speechManager.stop()
+            if conversationState == .speaking { conversationState = .idle }
+        }
+    }
+
     // MARK: - Sending messages
 
     /// Sends the current input to the backend and appends the reply (or an error message).
@@ -211,7 +221,7 @@ class ChatViewModel: ObservableObject {
                         lastSpokenLength = newEnd
                         if !hasStartedSpeaking {
                             hasStartedSpeaking = true
-                            conversationState = .speaking
+                            if !speechManager.isMuted { conversationState = .speaking }
                         }
                     }
                 } else if event?.done == true, let reply = event?.reply {
@@ -222,7 +232,7 @@ class ChatViewModel: ObservableObject {
                         let extraFromReply = reply.dropFirst(accumulated.count)
                         if !extraFromReply.isEmpty { speechManager.enqueueMore(String(extraFromReply)) }
                     }
-                    if !hasStartedSpeaking { conversationState = .speaking }
+                    if !hasStartedSpeaking && !speechManager.isMuted { conversationState = .speaking }
                     replacePlaceholderWithFinalReply(placeholderId: placeholderId, replyText: reply, speak: false)
                     return
                 } else if let errorMsg = event?.error, !errorMsg.isEmpty {
@@ -234,7 +244,7 @@ class ChatViewModel: ObservableObject {
             if !accumulated.isEmpty {
                 let remainder = accumulated.dropFirst(lastSpokenLength)
                 if !remainder.isEmpty { speechManager.enqueueMore(String(remainder)) }
-                if !hasStartedSpeaking { conversationState = .speaking }
+                if !hasStartedSpeaking && !speechManager.isMuted { conversationState = .speaking }
                 replacePlaceholderWithFinalReply(placeholderId: placeholderId, replyText: accumulated, speak: false)
             } else {
                 replacePlaceholderAndShowError("No reply from server.")
@@ -321,14 +331,22 @@ class ChatViewModel: ObservableObject {
         guard let idx = messages.lastIndex(where: { $0.id == placeholderId }) else {
             messages.append(ChatMessage(id: UUID(), text: replyText, isUser: false))
             trimMessagesIfNeeded()
-            conversationState = .speaking
+            if !speechManager.isMuted {
+                conversationState = .speaking
+            } else {
+                conversationState = .idle
+            }
             if speak { speechManager.speak(replyText) }
             lastThinkingPlaceholderText = nil
             thinkingEndTime = nil
             return
         }
         messages[idx] = ChatMessage(id: placeholderId, text: replyText, isUser: false)
-        conversationState = .speaking
+        if !speechManager.isMuted {
+            conversationState = .speaking
+        } else {
+            conversationState = .idle
+        }
         if speak { speechManager.speak(replyText) }
         lastThinkingPlaceholderText = nil
         thinkingEndTime = nil
@@ -340,20 +358,21 @@ class ChatViewModel: ObservableObject {
             let errorMessage = ChatMessage(id: UUID(), text: errorText, isUser: false)
             messages.append(errorMessage)
             trimMessagesIfNeeded()
-            conversationState = .speaking
+            if !speechManager.isMuted { conversationState = .speaking }
             speechManager.speak(errorText)
             return
         }
         let delay = max(0, endTime.timeIntervalSinceNow)
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            self?.removeThinkingPlaceholderIfNeeded()
+            guard let self else { return }
+            self.removeThinkingPlaceholderIfNeeded()
             let errorMessage = ChatMessage(id: UUID(), text: errorText, isUser: false)
-            self?.messages.append(errorMessage)
-            self?.trimMessagesIfNeeded()
-            self?.conversationState = .speaking
-            self?.speechManager.speak(errorText)
-            self?.lastThinkingPlaceholderText = nil
-            self?.thinkingEndTime = nil
+            self.messages.append(errorMessage)
+            self.trimMessagesIfNeeded()
+            if !self.speechManager.isMuted { self.conversationState = .speaking }
+            self.speechManager.speak(errorText)
+            self.lastThinkingPlaceholderText = nil
+            self.thinkingEndTime = nil
         }
     }
 
