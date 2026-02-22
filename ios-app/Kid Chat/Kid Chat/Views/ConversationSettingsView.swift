@@ -2,7 +2,7 @@
 //  ConversationSettingsView.swift
 //  Kid Chat
 //
-//  Sheet presented from the conversation page: agent voice, mute, and background.
+//  Sheet presented from the conversation page: agent voice, mute, and theme.
 //
 
 import AVFoundation
@@ -39,10 +39,10 @@ struct ConversationSettingsView: View {
                     Toggle("Mute agent voice", isOn: $settings.isAgentMuted)
                 }
 
-                Section("Background") {
-                    Picker("Conversation background", selection: $settings.backgroundStyle) {
-                        ForEach(ConversationBackground.allCases) { style in
-                            Text(style.displayName).tag(style)
+                Section("Theme") {
+                    Picker("Choose a theme", selection: $settings.backgroundStyle) {
+                        ForEach(ConversationBackground.allCases) { theme in
+                            Text(theme.displayName).tag(theme)
                         }
                     }
                     .pickerStyle(.navigationLink)

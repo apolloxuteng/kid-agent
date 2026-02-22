@@ -8,9 +8,10 @@
 
 import SwiftUI
 
-// MARK: - Background style
+// MARK: - App theme (background + accent for buttons)
 
-/// Conversation page background options. Each case provides a LinearGradient.
+/// App theme: conversation background gradient and accent gradient for header/secondary buttons.
+/// User picks a theme in Settings; it controls both the chat background and the look of Mode/Settings buttons.
 enum ConversationBackground: String, CaseIterable, Identifiable {
     case pastelBlue = "pastelBlue"
     case lavender = "lavender"
@@ -28,6 +29,7 @@ enum ConversationBackground: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Background gradient for the conversation area and header.
     var gradient: LinearGradient {
         switch self {
         case .pastelBlue:
@@ -48,6 +50,28 @@ enum ConversationBackground: String, CaseIterable, Identifiable {
             let top = Color(red: 1.0, green: 0.92, blue: 0.88)
             let bottom = Color(red: 0.98, green: 0.9, blue: 0.92)
             return LinearGradient(colors: [top, bottom], startPoint: .top, endPoint: .bottom)
+        }
+    }
+
+    /// Accent gradient for header buttons (Mode, Settings) and other themed controls. Matches the theme’s palette.
+    var accentGradient: LinearGradient {
+        switch self {
+        case .pastelBlue:
+            let start = KidTheme.micIdle
+            let end = Color(red: 0.25, green: 0.45, blue: 0.88)
+            return LinearGradient(colors: [start, end], startPoint: .topLeading, endPoint: .bottomTrailing)
+        case .lavender:
+            let start = Color(red: 0.75, green: 0.65, blue: 1.0)
+            let end = Color(red: 0.55, green: 0.45, blue: 0.9)
+            return LinearGradient(colors: [start, end], startPoint: .topLeading, endPoint: .bottomTrailing)
+        case .mint:
+            let start = Color(red: 0.45, green: 0.82, blue: 0.65)
+            let end = Color(red: 0.35, green: 0.7, blue: 0.55)
+            return LinearGradient(colors: [start, end], startPoint: .topLeading, endPoint: .bottomTrailing)
+        case .softSunset:
+            let start = Color(red: 1.0, green: 0.7, blue: 0.5)
+            let end = Color(red: 0.9, green: 0.55, blue: 0.4)
+            return LinearGradient(colors: [start, end], startPoint: .topLeading, endPoint: .bottomTrailing)
         }
     }
 }
@@ -84,9 +108,14 @@ final class ConversationSettings: ObservableObject {
         }
     }
 
-    /// Gradient for the conversation page and header. Derived from backgroundStyle.
+    /// Gradient for the conversation page and header. Derived from selected theme.
     var conversationGradient: LinearGradient {
         backgroundStyle.gradient
+    }
+
+    /// Accent gradient for header buttons (Mode, Settings). Derived from selected theme.
+    var accentGradient: LinearGradient {
+        backgroundStyle.accentGradient
     }
 
     init() {

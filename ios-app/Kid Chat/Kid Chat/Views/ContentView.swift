@@ -68,23 +68,23 @@ struct ContentView: View {
 
                 // Main content: back bar, header, messages, input bar (mic is overlaid below)
                 VStack(spacing: 0) {
-                    // Back to mode selection (left); Settings (right)
+                    // Back to mode selection (left); Settings (right) — themed pill style
                     HStack {
                         Button(action: goBackToModeSelection) {
                             Label("Mode", systemImage: "chevron.left")
                                 .font(.system(size: 16, weight: .medium, design: .rounded))
-                                .foregroundStyle(KidTheme.bubbleTextAI)
                         }
+                        .modifier(ThemedHeaderButtonModifier(accentGradient: conversationSettings.accentGradient))
                         .accessibilityLabel("Back to mode selection")
                         .accessibilityHint("Returns to choose Story, Knowledge, Question, or Joke mode and starts a new conversation")
                         Spacer(minLength: 0)
                         Button(action: { showSettings = true }) {
                             Image(systemName: "gearshape")
                                 .font(.system(size: 20, weight: .medium))
-                                .foregroundStyle(KidTheme.bubbleTextAI)
                         }
+                        .modifier(ThemedHeaderButtonModifier(accentGradient: conversationSettings.accentGradient))
                         .accessibilityLabel("Settings")
-                        .accessibilityHint("Voice, mute, and background options")
+                        .accessibilityHint("Voice, mute, and theme options")
                     }
                     .padding(.horizontal, 4)
                     .padding(.top, 8)
@@ -242,7 +242,7 @@ struct ContentView: View {
             } label: {
                 Image(systemName: "arrow.up.circle.fill")
                     .font(.system(size: 36))
-                    .foregroundStyle(KidTheme.micIdle)
+                    .foregroundStyle(conversationSettings.accentGradient)
             }
             .accessibilityLabel("Send message")
             .accessibilityHint("Sends your message to the assistant")
@@ -304,6 +304,25 @@ struct ContentView: View {
             speechRecognizer.toggleRecording()
         })
             .disabled(viewModel.isLoading)
+    }
+}
+
+// MARK: - Themed header button (pill with accent gradient, used for Mode and Settings)
+
+/// Applies theme accent gradient, pill shape, and soft shadow so header buttons match the selected theme.
+private struct ThemedHeaderButtonModifier: ViewModifier {
+    let accentGradient: LinearGradient
+
+    func body(content: Content) -> some View {
+        content
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(accentGradient)
+            )
+            .shadow(color: .black.opacity(0.12), radius: 6, x: 0, y: 3)
     }
 }
 
