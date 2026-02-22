@@ -44,33 +44,52 @@ final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
-        // Strip emojis so TTS doesn't read them; keep punctuation for sentence splitting
-        let textNoEmoji = stripEmojis(trimmed)
-
-        // Configure audio session for playback (needed so iPad/speaker output works after mic use)
-        let session = AVAudioSession.sharedInstance()
-        do {
-            try session.setCategory(.playback, mode: .default, options: [.duckOthers, .defaultToSpeaker])
-            try session.setActive(true, options: .notifyOthersOnDeactivation)
-        } catch {
-            // Continue anyway
-        }
+        ensureAudioSession()
 
         if synthesizer.isSpeaking {
             synthesizer.stopSpeaking(at: .immediate)
         }
+        sentenceQueue.removeAll()
 
+        let textNoEmoji = stripEmojis(trimmed)
         let sentences = splitIntoSentences(textNoEmoji)
-        sentenceQueue = sentences.map { sentence in
-            utterance(for: sentence)
-        }
+        sentenceQueue = sentences.map { utterance(for: $0) }
 
-        guard let first = sentenceQueue.first else {
-            onDidFinishSpeaking?()
+        startNextInQueueIfNeeded()
+    }
+
+    /// Appends more text to the speech queue and starts speaking if not already.
+    /// Use this during streaming so voice can start before the full message arrives.
+    func enqueueMore(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        ensureAudioSession()
+
+        let textNoEmoji = stripEmojis(trimmed)
+        let sentences = splitIntoSentences(textNoEmoji)
+        for s in sentences {
+            sentenceQueue.append(utterance(for: s))
+        }
+        startNextInQueueIfNeeded()
+    }
+
+    private func ensureAudioSession() {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            // .defaultToSpeaker is only valid with .playAndRecord; for .playback the default is already speaker.
+            try session.setCategory(.playback, mode: .default, options: [.duckOthers])
+            try session.setActive(true, options: .notifyOthersOnDeactivation)
+        } catch { }
+    }
+
+    private func startNextInQueueIfNeeded() {
+        guard !sentenceQueue.isEmpty, !synthesizer.isSpeaking else {
+            if sentenceQueue.isEmpty { onDidFinishSpeaking?() }
             return
         }
-        sentenceQueue.removeFirst()
-        synthesizer.speak(first)
+        let next = sentenceQueue.removeFirst()
+        synthesizer.speak(next)
     }
 
     /// Stops playback immediately.

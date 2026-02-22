@@ -25,8 +25,17 @@ pip install -r requirements.txt
 
 ### 3. Run the server
 
+**Use the venv** so all dependencies (including `httpx`) are found:
+
 ```bash
+source venv/bin/activate
 uvicorn server:app --reload
+```
+
+Or run uvicorn via the venv’s Python (no activate needed):
+
+```bash
+./venv/bin/uvicorn server:app --reload
 ```
 
 The API will be available at **http://localhost:8000**.
@@ -43,8 +52,30 @@ The API will be available at **http://localhost:8000**.
 | GET    | /health | Health check; returns `{"status":"ok"}` |
 | GET    | /profile | Returns the stored child profile for `profile_id` (query: `?profile_id=...`). |
 | POST   | /chat   | Send a message; body: `{"message": "your text", "profile_id": "uuid-or-id"}`; returns `{"reply": "..."}`. All memory and profile updates apply only to that profile. |
+| POST   | /chat/stream | Same as /chat but streams the reply as Server-Sent Events (SSE). See [Streaming](#streaming-post-chatstream) below. |
 | POST   | /reset  | Clear conversation memory for one profile; query: `?profile_id=...`. |
 | POST   | /profile/reset | Clear the child profile (name and interests) for one profile; query: `?profile_id=...`. |
+
+## Streaming (POST /chat/stream)
+
+**POST /chat/stream** uses the same request body as **POST /chat** but returns a **Server-Sent Events (SSE)** stream so the client can show tokens as they arrive.
+
+- **Event format:** Each SSE event is a single line: `data: <JSON>`. The JSON object can be:
+  - `{"token": "..."}` — one piece of the reply; the client should append this to the displayed message.
+  - `{"done": true, "reply": "..."}` — stream finished; `reply` is the full assistant message (use this for history/TTS if you prefer).
+  - `{"error": "..."}` — something went wrong (e.g. Ollama down); no reply is stored.
+- **Backward compatibility:** The non-streaming **POST /chat** is unchanged; existing clients keep working.
+
+### iOS app changes to use streaming
+
+To use **POST /chat/stream** from the iOS app for lower perceived latency:
+
+1. **Request:** Use `URLSession` or `URLSessionConfiguration` with a POST to `.../chat/stream` and the same JSON body (`message`, `profile_id`). Do not expect a single JSON response; the response body is an SSE stream.
+2. **Consume the stream:** Read the response body as a stream (e.g. `URLSessionDelegate` with `urlSession(_:dataTask:didReceive data:)` or `AsyncThrowingStream` over the bytes). Parse line by line; when a line starts with `data: `, parse the rest as JSON.
+3. **Update UI:** For each `{"token": "..."}` event, append the value to the current message and refresh the bubble. When you receive `{"done": true, "reply": "..."}`, treat the message as complete (e.g. trigger TTS on `reply`).
+4. **Errors:** On `{"error": "..."}` or a broken stream, show an error and do not add a reply to the conversation.
+
+No backend changes are required beyond calling `/chat/stream` instead of `/chat`; history and profile updates behave the same.
 
 ## Per-profile data (no database)
 
@@ -77,6 +108,16 @@ In `server.py` you can change:
 Make sure Ollama is running and the model is pulled before calling `/chat`.
 
 ## Troubleshooting
+
+**"ModuleNotFoundError: No module named 'httpx'"**
+
+The server needs `httpx` (and other deps) from the project venv. Use the venv when running:
+
+1. `cd kid-agent/backend && source venv/bin/activate`
+2. `pip install -r requirements.txt`  (if you just created the venv or added deps)
+3. `uvicorn server:app --reload`
+
+If you use `--reload`, start uvicorn with the venv’s interpreter (e.g. `./venv/bin/uvicorn` or run `uvicorn` after `source venv/bin/activate`) so the reload subprocess sees the same packages.
 
 **"Ollama request failed: 404 Client Error: Not Found for url: .../api/generate"**
 

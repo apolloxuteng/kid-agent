@@ -45,26 +45,30 @@ struct ProfileSelectionView: View {
 
                 Spacer(minLength: 24)
 
-                // Bottom: Add Profile + Continue
+                // Bottom: Add Profile (small) + Continue (primary)
                 let atMaxProfiles = profileManager.profiles.count >= ProfileManager.maxProfiles
                 VStack(spacing: 14) {
-                    Button {
-                        if !atMaxProfiles { showAddProfile = true }
-                    } label: {
-                        Label("Add Profile", systemImage: "plus.circle.fill")
-                            .font(.system(size: 18, weight: .semibold, design: .rounded))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 14)
-                            .background(atMaxProfiles ? Color.gray : KidTheme.micIdle.opacity(0.9))
-                            .foregroundStyle(.white)
-                            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    HStack {
+                        if atMaxProfiles {
+                            Text("Maximum \(ProfileManager.maxProfiles) profiles.")
+                                .font(.system(size: 14, weight: .medium, design: .rounded))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 0)
+                        Button {
+                            if !atMaxProfiles { showAddProfile = true }
+                        } label: {
+                            Label("Add Profile", systemImage: "plus.circle.fill")
+                                .font(.system(size: 15, weight: .medium, design: .rounded))
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
+                                .background(atMaxProfiles ? Color.gray : KidTheme.micIdle.opacity(0.9))
+                                .foregroundStyle(.white)
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                        .disabled(atMaxProfiles)
                     }
-                    .disabled(atMaxProfiles)
-                    if atMaxProfiles {
-                        Text("Maximum \(ProfileManager.maxProfiles) profiles.")
-                            .font(.system(size: 14, weight: .medium, design: .rounded))
-                            .foregroundStyle(.secondary)
-                    }
+                    .padding(.horizontal, 4)
 
                     Button(action: onContinue) {
                         Text("Continue")

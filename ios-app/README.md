@@ -38,17 +38,17 @@ Minimal SwiftUI chat app that talks to the kid-agent backend over your local net
    - Type **App Transport** and pick **App Transport Security Settings** (Dictionary). Expand it with the disclosure triangle.
    - Click the **+** next to "App Transport Security Settings" and add **Allow Arbitrary Loads** (Boolean) = **YES**.
 
-4. **Set the server URL:** In `ChatViewModel.swift`, set `SERVER_URL` to your Mac’s IP and port, e.g.:
+4. **Set the server URL:** In `ChatViewModel.swift`, set `SERVER_BASE` to your Mac’s IP and port, e.g.:
    ```swift
-   static let SERVER_URL = "http://192.168.1.100:8000/chat"
+   static let SERVER_BASE = "http://192.168.1.100:8000"
    ```
-   Find your Mac’s IP: **System Settings → Network → Wi‑Fi → Details** (or run `ifconfig | grep "inet "` in Terminal).
+   The app uses the streaming endpoint `/chat/stream`. Find your Mac’s IP: **System Settings → Network → Wi‑Fi → Details** (or run `ifconfig | grep "inet "` in Terminal).
 
 5. **Run:** Choose a simulator or a device and press Run. Make sure the backend is running (`uvicorn server:app` in `kid-agent/backend`) and that the phone/simulator can reach that IP.
 
 ## Configuration
 
-- **SERVER_URL** in `ChatViewModel.swift`: change `192.168.1.100` to your Mac Mini (or dev Mac) IP so the app can reach the backend. The backend must be running at that address (e.g. `uvicorn server:app` in `kid-agent/backend`).
+- **SERVER_BASE** in `ChatViewModel.swift`: change the host to your Mac Mini (or dev Mac) IP so the app can reach the backend. The app calls `SERVER_BASE + "/chat/stream"` for streaming replies. The backend must be running (e.g. `uvicorn server:app` in `kid-agent/backend`).
 
 ## File roles
 
@@ -64,7 +64,7 @@ Minimal SwiftUI chat app that talks to the kid-agent backend over your local net
 ## Quick test
 
 1. Start backend: `cd kid-agent/backend && source venv/bin/activate && uvicorn server:app --reload --host 0.0.0.0` (use `--host 0.0.0.0` so the phone can reach it).
-2. Set `SERVER_URL` in `ChatViewModel.swift` to your Mac’s IP.
+2. Set `SERVER_BASE` in `ChatViewModel.swift` to your Mac’s IP.
 3. Run the app and send a message.
 
 ---
