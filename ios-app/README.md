@@ -50,16 +50,20 @@ Minimal SwiftUI chat app that talks to the kid-agent backend over your local net
 
 - **SERVER_BASE** in `ChatViewModel.swift`: change the host to your Mac Mini (or dev Mac) IP so the app can reach the backend. The app calls `SERVER_BASE + "/chat/stream"` for streaming replies. The backend must be running (e.g. `uvicorn server:app` in `kid-agent/backend`).
 
-## File roles
+## Project structure
 
-| File              | Role                                                                 |
-|-------------------|----------------------------------------------------------------------|
-| `KidChatApp.swift`| App entry point; creates the window with `ContentView`.             |
-| `ContentView.swift` | Chat UI: title, message list, input bar, mic button, Send button. |
-| `ChatViewModel.swift` | State and networking: messages, input text, `sendMessage()`.    |
-| `ChatMessage.swift`  | Data model for one message (id, text, isUser).                   |
-| `SpeechRecognizer.swift` | Voice input: requests permissions, records with AVAudioEngine, converts speech to text with Speech.framework. |
-| `SpeechManager.swift` | Text-to-speech: uses AVSpeechSynthesizer to speak AI replies aloud (child-friendly rate and volume). |
+Source files are grouped by role under `Kid Chat/Kid Chat/`:
+
+| Folder        | Contents |
+|---------------|----------|
+| **App**       | `KidChatApp.swift` — app entry point, window with `ContentView`, injects `ProfileManager`. |
+| **Models**    | `ChatMessage.swift`, `ChildProfile.swift` — data types for messages and child profiles. |
+| **ViewModels**| `ChatViewModel.swift`, `ConversationViewModel.swift`, `ProfileManager.swift` — state, networking, profile storage. |
+| **Views**     | `ContentView.swift`, `ProfileSelectionView.swift`, `GreetingView.swift`, `ProfilePickerView.swift`, `CharacterHeaderView.swift`, `LargeMicButton.swift` — SwiftUI screens and components. |
+| **Services**  | `SpeechManager.swift` (TTS), `SpeechRecognizer.swift` (voice input). |
+| **Design**    | `KidTheme.swift` — shared colors and theme used across views. |
+
+Assets stay at the app root (`Assets.xcassets`, etc.).
 
 ## Quick test
 

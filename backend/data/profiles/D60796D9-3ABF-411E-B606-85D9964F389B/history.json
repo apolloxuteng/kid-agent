@@ -78,5 +78,13 @@
   {
     "role": "assistant",
     "content": "Okay! Once there were two dogs, Binkie and Whiskers. They both found a bone and started to play a game of chase. But instead of one dog chasing the other, they just ran around in circles, each thinking the other had the bone! They both barked with laughter when they realized what was happening. Do you think Binkie and Whiskers will play again?"
+  },
+  {
+    "role": "user",
+    "content": "Tell me a funny story"
+  },
+  {
+    "role": "assistant",
+    "content": "Once there was a dog named Max who thought he was playing hide-and-seek with his friend, a cat named Mittens. But really, Max and Mittens were just running in circles! They both laughed because they didn't know why they couldn't find each other. Do you think they'll try again?"
   }
 ]
