@@ -79,20 +79,34 @@ struct CharacterHeaderView: View {
         .animation(.easeInOut(duration: 0.3), value: conversationState)
     }
 
-    // MARK: - Avatar (emoji + circle + shadow; idle = gentle breathing scale)
+    // MARK: - Avatar (state-based motion so kids see who is talking or listening)
 
     private var avatarView: some View {
         Group {
-            if conversationState == .idle {
+            switch conversationState {
+            case .idle:
+                // Gentle breathing so the avatar feels alive
                 TimelineView(.animation(minimumInterval: 0.033)) { context in
                     let t = context.date.timeIntervalSinceReferenceDate
                     let scale = 1.0 + 0.025 * (1 + cos(.pi * t))
                     avatarBody.scaleEffect(scale)
                 }
-            } else {
-                avatarBody
-                    .scaleEffect(1.04)
-                    .animation(.easeInOut(duration: 0.3), value: conversationState)
+            case .listening:
+                // Visible "listening" pulse so kids see "it's my turn to talk"
+                TimelineView(.animation(minimumInterval: 0.04)) { context in
+                    let t = context.date.timeIntervalSinceReferenceDate
+                    let scale = 1.0 + 0.025 * (1 + cos(2 * Double.pi * t / 0.6))
+                    avatarBody.scaleEffect(scale)
+                }
+            case .speaking:
+                // Clearly visible "talking" bounce so kids see the character is speaking
+                TimelineView(.animation(minimumInterval: 0.04)) { context in
+                    let t = context.date.timeIntervalSinceReferenceDate
+                    let scale = 1.0 + 0.04 * (1 + cos(2 * Double.pi * t / 0.5))
+                    avatarBody.scaleEffect(scale)
+                }
+            case .thinking:
+                avatarBody.scaleEffect(1.04)
             }
         }
     }

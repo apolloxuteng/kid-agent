@@ -17,6 +17,8 @@ struct LargeMicButton: View {
     let state: ConversationState
     /// Called when the user taps the button. Not called when state is .thinking (disabled).
     let onTap: () -> Void
+    /// When provided, used for idle state so mic matches the app theme; nil = KidTheme.micIdle.
+    var idleGradient: LinearGradient? = nil
 
     /// Button size: 90pt (within 80–100pt). Large, easy for kids to tap. Floating look: parent adds .padding(.bottom, 100).
     private let size: CGFloat = 90
@@ -43,11 +45,16 @@ struct LargeMicButton: View {
     // MARK: - Background and shadow by state
 
     private var circleBackground: some View {
-        Circle()
-            .fill(backgroundColor.gradient)
+        Group {
+            if state == .idle, let gradient = idleGradient {
+                Circle().fill(gradient)
+            } else {
+                Circle().fill(backgroundColor.gradient)
+            }
+        }
     }
 
-    /// Background color: blue (idle), red (listening), orange (thinking), purple (speaking).
+    /// Background color: red (listening), orange (thinking), purple (speaking). Idle uses idleGradient when provided.
     private var backgroundColor: Color {
         switch state {
         case .idle: return KidTheme.micIdle
@@ -57,10 +64,10 @@ struct LargeMicButton: View {
         }
     }
 
-    /// Shadow color: matches state; stronger for speaking (glow).
+    /// Shadow color: matches state; stronger for speaking (glow). Idle with theme uses soft shadow.
     private var shadowColor: Color {
         switch state {
-        case .idle: return backgroundColor.opacity(0.35)
+        case .idle: return (idleGradient != nil ? Color.black : backgroundColor).opacity(0.35)
         case .listening: return backgroundColor.opacity(0.5)
         case .thinking: return backgroundColor.opacity(0.3)
         case .speaking: return KidTheme.micSpeaking.opacity(0.6)

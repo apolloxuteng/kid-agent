@@ -14,6 +14,7 @@ import SwiftUI
 /// Full-screen profile picker shown at launch. Tap a profile to select it; Continue goes to greeting.
 struct ProfileSelectionView: View {
     @EnvironmentObject private var profileManager: ProfileManager
+    @EnvironmentObject private var conversationSettings: ConversationSettings
     @State private var showAddProfile = false
     @State private var profileToEdit: ChildProfile?
 
@@ -22,12 +23,8 @@ struct ProfileSelectionView: View {
 
     var body: some View {
         ZStack {
-            LinearGradient(
-                colors: [KidTheme.backgroundTop, KidTheme.backgroundBottom],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea()
+            conversationSettings.conversationGradient
+                .ignoresSafeArea()
 
             VStack(spacing: 0) {
                 // Title
@@ -62,10 +59,11 @@ struct ProfileSelectionView: View {
                                 .font(.system(size: 15, weight: .medium, design: .rounded))
                                 .padding(.horizontal, 16)
                                 .padding(.vertical, 8)
-                                .background(atMaxProfiles ? Color.gray : KidTheme.micIdle.opacity(0.9))
+                                .background(atMaxProfiles ? LinearGradient(colors: [Color.gray, Color.gray], startPoint: .leading, endPoint: .trailing) : conversationSettings.accentGradient)
                                 .foregroundStyle(.white)
                                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         }
+                        .buttonStyle(ProfileScreenTapStyle())
                         .disabled(atMaxProfiles)
                     }
                     .padding(.horizontal, 4)
@@ -76,9 +74,10 @@ struct ProfileSelectionView: View {
                             .foregroundStyle(.white)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 16)
-                            .background(canContinue ? KidTheme.micIdle : Color.gray)
+                            .background(canContinue ? conversationSettings.accentGradient : LinearGradient(colors: [Color.gray, Color.gray], startPoint: .leading, endPoint: .trailing))
                             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                     }
+                    .buttonStyle(ProfileScreenTapStyle())
                     .disabled(!canContinue)
                 }
                 .padding(.horizontal, 24)
@@ -97,10 +96,12 @@ struct ProfileSelectionView: View {
         }
     }
 
-    /// Shown when there are no profiles yet.
+    /// Shown when there are no profiles yet. Large emoji + encouraging line so kids see what to do.
     private var emptyState: some View {
-        VStack(spacing: 20) {
-            Text("Add your first profile to get started.")
+        VStack(spacing: 24) {
+            Text("👋")
+                .font(.system(size: 64))
+            Text("Add your first profile to get started!")
                 .font(.system(size: 18, weight: .medium, design: .rounded))
                 .foregroundStyle(KidTheme.bubbleTextAI.opacity(0.9))
                 .multilineTextAlignment(.center)
@@ -131,10 +132,10 @@ struct ProfileSelectionView: View {
             } label: {
                 HStack(spacing: 16) {
                     Text(profile.avatar)
-                        .font(.system(size: 44))
-                        .frame(width: 56, height: 56)
+                        .font(.system(size: 48))
+                        .frame(width: 60, height: 60)
                         .background(Circle().fill(Color.white.opacity(0.9)))
-                        .shadow(color: .black.opacity(0.08), radius: 4, x: 0, y: 2)
+                        .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 2)
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text(profile.name)
@@ -148,16 +149,23 @@ struct ProfileSelectionView: View {
 
                     if isActive {
                         Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(KidTheme.micIdle)
-                            .font(.system(size: 22))
+                            .foregroundStyle(conversationSettings.accentGradient)
+                            .font(.system(size: 24))
                     }
                 }
-                .padding(.vertical, 12)
-                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
+                .padding(.horizontal, 18)
                 .background(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(isActive ? KidTheme.micIdle.opacity(0.15) : Color.white.opacity(0.6))
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .fill(Color.white.opacity(isActive ? 0.85 : 0.6))
                 )
+                .overlay {
+                    if isActive {
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .strokeBorder(conversationSettings.accentGradient, lineWidth: 3)
+                    }
+                }
+                .shadow(color: .black.opacity(0.12), radius: 10, x: 0, y: 4)
             }
             .buttonStyle(.plain)
 
@@ -166,7 +174,7 @@ struct ProfileSelectionView: View {
             } label: {
                 Image(systemName: "pencil.circle.fill")
                     .font(.system(size: 28))
-                    .foregroundStyle(KidTheme.micIdle)
+                    .foregroundStyle(conversationSettings.accentGradient)
             }
             .buttonStyle(.plain)
         }
@@ -179,9 +187,19 @@ struct ProfileSelectionView: View {
     }
 }
 
+// MARK: - Visible tap feedback for profile screen buttons
+private struct ProfileScreenTapStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.92 : 1.0)
+            .animation(.spring(response: 0.3, dampingFraction: 0.6), value: configuration.isPressed)
+    }
+}
+
 // MARK: - Preview
 
 #Preview {
     ProfileSelectionView(onContinue: {})
         .environmentObject(ProfileManager())
+        .environmentObject(ConversationSettings())
 }

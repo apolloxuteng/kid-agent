@@ -29,6 +29,8 @@ struct ContentView: View {
     @State private var lastAnimatedMessageID: UUID? = nil
     /// Vertical offset for floating emoji (0 = bottom, negative = moves up).
     @State private var floatingEmojiOffset: CGFloat = 0
+    /// Send button scale for visible celebration when user sends a message.
+    @State private var sendButtonScale: CGFloat = 1.0
 
     var body: some View {
         Group {
@@ -193,7 +195,7 @@ struct ContentView: View {
     private func messageListContent(proxy: ScrollViewProxy) -> some View {
         LazyVStack(alignment: .leading, spacing: 14) {
             ForEach(viewModel.messages) { message in
-                MessageBubble(message: message)
+                MessageBubble(message: message, accentGradient: conversationSettings.accentGradient)
                     .id(message.id)
                     .transition(MessageBubbleStyle.style(for: message.text).transition)
             }
@@ -238,11 +240,21 @@ struct ContentView: View {
                 }
 
             Button {
+                // Visible celebration: scale up then spring back so kids see "my message was sent"
+                withAnimation(.spring(response: 0.25, dampingFraction: 0.6)) {
+                    sendButtonScale = 1.2
+                }
                 viewModel.sendMessage()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
+                        sendButtonScale = 1.0
+                    }
+                }
             } label: {
                 Image(systemName: "arrow.up.circle.fill")
                     .font(.system(size: 36))
                     .foregroundStyle(conversationSettings.accentGradient)
+                    .scaleEffect(sendButtonScale)
             }
             .accessibilityLabel("Send message")
             .accessibilityHint("Sends your message to the assistant")
@@ -302,7 +314,7 @@ struct ContentView: View {
                 viewModel.setConversationState(.listening)
             }
             speechRecognizer.toggleRecording()
-        })
+        }, idleGradient: conversationSettings.accentGradient)
             .disabled(viewModel.isLoading)
     }
 }
@@ -394,6 +406,7 @@ enum MessageBubbleStyle {
 /// Max width ~75% so lines don’t stretch too wide; large tap/read area for kids.
 struct MessageBubble: View {
     let message: ChatMessage
+    var accentGradient: LinearGradient? = nil
 
     private var bubbleStyle: MessageBubbleStyle {
         MessageBubbleStyle.style(for: message.text)
@@ -427,6 +440,12 @@ struct MessageBubble: View {
                             : LinearGradient(colors: [KidTheme.bubbleAIStart, KidTheme.bubbleAIEnd], startPoint: .topLeading, endPoint: .bottomTrailing)
                     )
             )
+            .overlay {
+                if !message.isUser, let gradient = accentGradient {
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .strokeBorder(gradient, lineWidth: 2.5)
+                }
+            }
             .frame(maxWidth: 340, alignment: message.isUser ? .trailing : .leading)
     }
 }
