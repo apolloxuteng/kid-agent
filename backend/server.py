@@ -2,17 +2,13 @@
 Kid Agent Backend — FastAPI server that talks to a local Ollama LLM
 with a kid-friendly personality and per-child conversation memory.
 
-All code lives in this file. Profile data is stored under the backend folder:
+Profile data is stored in a single SQLite database (data/kid_agent.db):
 
-  backend/
-  └── data/
-       └── profiles/
-            └── {profile_id}/          e.g. spencer, or a UUID from the app
-                 ├── profile.json      name, interests (updated from messages)
-                 ├── summary.txt      short conversation summary
-                 └── history.json     recent messages for context
+  - profiles: profile_id, name, interests (JSON)
+  - summaries: profile_id, summary_text
+  - history: profile_id, seq, role, content (last N messages per profile)
 
-Folders are created automatically when a profile is first used. No database.
+Sensitive columns are encrypted at rest (application-level). Key via KID_AGENT_DB_KEY.
 """
 
 import asyncio
@@ -21,12 +17,64 @@ import json
 import logging
 import os
 import re
+import sqlite3
 from contextlib import asynccontextmanager
 
+from dotenv import load_dotenv
+
+# Load .env from the backend directory so KID_AGENT_DB_KEY is available when running uvicorn
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+
+from cryptography.fernet import Fernet, InvalidToken
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import httpx
+
+# Optional encryption at rest: set KID_AGENT_DB_KEY to a Fernet key (e.g. from Fernet.generate_key()).
+# Losing the key means encrypted data cannot be decrypted. Backups of the DB file must be kept secure.
+_DB_KEY_ENV = "KID_AGENT_DB_KEY"
+_fernet: Fernet | None = None
+
+
+def _get_fernet() -> Fernet | None:
+    """Return Fernet instance if KID_AGENT_DB_KEY is set and valid; else None (no encryption)."""
+    global _fernet
+    if _fernet is not None:
+        return _fernet
+    key_b64 = os.environ.get(_DB_KEY_ENV)
+    if not key_b64 or not (key_b64 if isinstance(key_b64, str) else b"").strip():
+        return None
+    key_bytes = key_b64.strip().encode() if isinstance(key_b64, str) else key_b64
+    try:
+        _fernet = Fernet(key_bytes)
+        return _fernet
+    except Exception:
+        logger.warning("Invalid %s; running without encryption. Generate a key with: Fernet.generate_key()", _DB_KEY_ENV)
+        return None
+
+
+def _encrypt_cell(plain: str | None) -> str | None:
+    """Encrypt a string for storage; return plaintext if encryption is disabled or plain is empty."""
+    if plain is None or plain == "":
+        return plain
+    f = _get_fernet()
+    if f is None:
+        return plain
+    return f.encrypt(plain.encode("utf-8")).decode("ascii")
+
+
+def _decrypt_cell(cipher: str | None) -> str | None:
+    """Decrypt a stored value; if decrypt fails (e.g. legacy plaintext), return as-is."""
+    if cipher is None or cipher == "":
+        return cipher
+    f = _get_fernet()
+    if f is None:
+        return cipher
+    try:
+        return f.decrypt(cipher.encode("ascii")).decode("utf-8")
+    except InvalidToken:
+        return cipher
 
 # =============================================================================
 # 1. App and config
@@ -40,9 +88,9 @@ _ollama_client: httpx.AsyncClient | None = None
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    """Create data dirs and httpx AsyncClient for Ollama on startup; close client on shutdown."""
+    """Create DB tables and httpx AsyncClient for Ollama on startup; close client on shutdown."""
     global _ollama_client
-    os.makedirs(PROFILES_ROOT, exist_ok=True)
+    init_db()
     _ollama_client = httpx.AsyncClient(
         timeout=httpx.Timeout(60.0),
         limits=httpx.Limits(max_keepalive_connections=2, max_connections=4),
@@ -63,6 +111,7 @@ app = FastAPI(
 _BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(_BACKEND_DIR, "data")
 PROFILES_ROOT = os.path.join(DATA_DIR, "profiles")
+DB_PATH = os.path.join(DATA_DIR, "kid_agent.db")
 
 
 def _env_int(key: str, default: int) -> int:
@@ -86,33 +135,15 @@ _history_cache: dict[str, list] = {}
 
 
 # =============================================================================
-# 2. Profile data: paths and file I/O (data/profiles/{profile_id}/)
+# 2. Profile data: SQLite (data/kid_agent.db)
 # =============================================================================
 
 def _validate_profile_id(profile_id: str) -> None:
-    """Reject invalid profile_id to avoid path traversal; raise 400 if invalid."""
+    """Reject invalid profile_id; raise 400 if invalid."""
     if not profile_id or len(profile_id) > 128:
         raise HTTPException(status_code=400, detail="profile_id is required and must be at most 128 characters")
     if not re.match(r"^[a-zA-Z0-9\-_]+$", profile_id):
         raise HTTPException(status_code=400, detail="profile_id may only contain letters, digits, hyphens, underscores")
-
-
-def _profile_dir(profile_id: str) -> str:
-    """Return the absolute path to this profile's folder (e.g. .../data/profiles/spencer/)."""
-    _validate_profile_id(profile_id)
-    return os.path.join(PROFILES_ROOT, profile_id)
-
-
-def _ensure_profile_dir(profile_id: str) -> str:
-    """Create data/profiles/{profile_id}/ if it does not exist. Return the folder path."""
-    path = _profile_dir(profile_id)
-    os.makedirs(path, exist_ok=True)
-    return path
-
-
-def _path(profile_id: str, filename: str) -> str:
-    """Path to a file inside this profile's folder (e.g. profile.json, summary.txt, history.json)."""
-    return os.path.join(_profile_dir(profile_id), filename)
 
 
 def _evict_one_if_needed(cache: dict, new_key: str) -> None:
@@ -121,141 +152,195 @@ def _evict_one_if_needed(cache: dict, new_key: str) -> None:
         cache.pop(next(iter(cache)), None)
 
 
+def init_db() -> None:
+    """Create data dir and SQLite tables if they do not exist."""
+    os.makedirs(DATA_DIR, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS profiles (
+                profile_id TEXT PRIMARY KEY,
+                name TEXT,
+                interests TEXT
+            );
+            CREATE TABLE IF NOT EXISTS summaries (
+                profile_id TEXT PRIMARY KEY,
+                summary_text TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS history (
+                profile_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                PRIMARY KEY (profile_id, seq)
+            );
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _ensure_profile_dir(profile_id: str) -> None:
+    """Ensure profile and summary rows exist in DB for this profile_id (insert defaults if missing)."""
+    _validate_profile_id(profile_id)
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO profiles (profile_id, name, interests) VALUES (?, ?, ?)",
+            (profile_id, None, "[]"),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO summaries (profile_id, summary_text) VALUES (?, ?)",
+            (profile_id, ""),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def load_profile_json(profile_id: str) -> dict:
-    """Load profile.json for this profile; return { name, interests } with defaults. Uses in-memory cache."""
+    """Load profile for this profile_id; return { name, interests } with defaults. Uses in-memory cache."""
     if profile_id in _profile_cache:
         return copy.deepcopy(_profile_cache[profile_id])
-    path = _path(profile_id, "profile.json")
-    if not os.path.isfile(path):
-        out = {"name": None, "interests": []}
-        _evict_one_if_needed(_profile_cache, profile_id)
-        _profile_cache[profile_id] = out
-        return copy.deepcopy(out)
+    conn = sqlite3.connect(DB_PATH)
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        name = data.get("name")
-        interests = data.get("interests", [])
-        if not isinstance(interests, list):
+        row = conn.execute(
+            "SELECT name, interests FROM profiles WHERE profile_id = ?",
+            (profile_id,),
+        ).fetchone()
+        if row is None:
+            out = {"name": None, "interests": []}
+        else:
+            name_raw, interests_raw = row[0], row[1]
+            name = _decrypt_cell(name_raw)
             interests = []
-        out = {"name": name, "interests": interests}
+            if interests_raw:
+                try:
+                    interests_json = _decrypt_cell(interests_raw) or "[]"
+                    interests = json.loads(interests_json)
+                    if not isinstance(interests, list):
+                        interests = []
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            out = {"name": name, "interests": interests}
         _evict_one_if_needed(_profile_cache, profile_id)
         _profile_cache[profile_id] = out
         return copy.deepcopy(out)
-    except (json.JSONDecodeError, OSError):
-        out = {"name": None, "interests": []}
-        _evict_one_if_needed(_profile_cache, profile_id)
-        _profile_cache[profile_id] = out
-        return copy.deepcopy(out)
+    finally:
+        conn.close()
 
 
 def save_profile_json(profile_id: str, data: dict) -> bool:
-    """Write profile.json for this profile and update cache (atomic write). Returns True on success, False on write error (logged)."""
+    """Write profile for this profile_id and update cache. Returns True on success."""
     _ensure_profile_dir(profile_id)
-    path = _path(profile_id, "profile.json")
-    path_tmp = path + ".tmp"
+    name_val = data.get("name")
+    interests_json = json.dumps(data.get("interests") or [])
+    name_stored = _encrypt_cell(name_val if name_val is None else str(name_val))
+    interests_stored = _encrypt_cell(interests_json)
+    conn = sqlite3.connect(DB_PATH)
     try:
-        with open(path_tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        os.replace(path_tmp, path)
+        conn.execute(
+            "INSERT OR REPLACE INTO profiles (profile_id, name, interests) VALUES (?, ?, ?)",
+            (profile_id, name_stored, interests_stored),
+        )
+        conn.commit()
         _profile_cache[profile_id] = copy.deepcopy(data)
         return True
-    except OSError as e:
-        logger.exception("Failed to save profile.json for profile_id=%s: %s", profile_id, e)
-        if os.path.isfile(path_tmp):
-            try:
-                os.remove(path_tmp)
-            except OSError:
-                pass
+    except sqlite3.Error as e:
+        logger.exception("Failed to save profile for profile_id=%s: %s", profile_id, e)
         return False
+    finally:
+        conn.close()
 
 
 def load_summary(profile_id: str) -> str:
-    """Load summary.txt for this profile; return empty string if missing. Uses in-memory cache."""
+    """Load summary for this profile_id; return empty string if missing. Uses in-memory cache."""
     if profile_id in _summary_cache:
         return _summary_cache[profile_id]
-    path = _path(profile_id, "summary.txt")
-    if not os.path.isfile(path):
-        _evict_one_if_needed(_summary_cache, profile_id)
-        _summary_cache[profile_id] = ""
-        return ""
+    conn = sqlite3.connect(DB_PATH)
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            text = f.read().strip()
+        row = conn.execute(
+            "SELECT summary_text FROM summaries WHERE profile_id = ?",
+            (profile_id,),
+        ).fetchone()
+        raw = (row[0] or "").strip() if row else ""
+        text = (_decrypt_cell(raw) or "").strip()
         _evict_one_if_needed(_summary_cache, profile_id)
         _summary_cache[profile_id] = text
         return text
-    except OSError:
-        _evict_one_if_needed(_summary_cache, profile_id)
-        _summary_cache[profile_id] = ""
-        return ""
+    finally:
+        conn.close()
 
 
 def save_summary(profile_id: str, text: str) -> bool:
-    """Write summary.txt for this profile and update cache (atomic write). Returns True on success, False on write error (logged)."""
+    """Write summary for this profile_id and update cache. Returns True on success."""
     _ensure_profile_dir(profile_id)
-    path = _path(profile_id, "summary.txt")
-    path_tmp = path + ".tmp"
+    stored = _encrypt_cell(text or "") or ""
+    conn = sqlite3.connect(DB_PATH)
     try:
-        with open(path_tmp, "w", encoding="utf-8") as f:
-            f.write(text)
-        os.replace(path_tmp, path)
+        conn.execute(
+            "INSERT OR REPLACE INTO summaries (profile_id, summary_text) VALUES (?, ?)",
+            (profile_id, stored),
+        )
+        conn.commit()
         _summary_cache[profile_id] = text
         return True
-    except OSError as e:
-        logger.exception("Failed to save summary.txt for profile_id=%s: %s", profile_id, e)
-        if os.path.isfile(path_tmp):
-            try:
-                os.remove(path_tmp)
-            except OSError:
-                pass
+    except sqlite3.Error as e:
+        logger.exception("Failed to save summary for profile_id=%s: %s", profile_id, e)
         return False
+    finally:
+        conn.close()
 
 
 def load_history(profile_id: str) -> list[dict]:
-    """Load history.json for this profile; list of { role, content }. Return [] if missing or invalid. Uses in-memory cache."""
+    """Load last MAX_HISTORY_MESSAGES for this profile_id; list of { role, content }. Uses in-memory cache."""
     if profile_id in _history_cache:
         return copy.deepcopy(_history_cache[profile_id])
-    path = _path(profile_id, "history.json")
-    if not os.path.isfile(path):
-        _evict_one_if_needed(_history_cache, profile_id)
-        _history_cache[profile_id] = []
-        return []
+    conn = sqlite3.connect(DB_PATH)
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, list):
-            out = []
-        else:
-            out = [e for e in data if isinstance(e, dict) and e.get("role") in ("user", "assistant") and isinstance(e.get("content"), str)]
+        rows = conn.execute(
+            """
+            SELECT role, content FROM history
+            WHERE profile_id = ?
+            ORDER BY seq DESC
+            LIMIT ?
+            """,
+            (profile_id, MAX_HISTORY_MESSAGES),
+        ).fetchall()
+        out = []
+        for role, content_raw in reversed(rows):
+            content = _decrypt_cell(content_raw) if content_raw else ""
+            if role in ("user", "assistant") and isinstance(content, str):
+                out.append({"role": role, "content": content})
         _evict_one_if_needed(_history_cache, profile_id)
         _history_cache[profile_id] = out
         return copy.deepcopy(out)
-    except (json.JSONDecodeError, OSError):
-        _evict_one_if_needed(_history_cache, profile_id)
-        _history_cache[profile_id] = []
-        return []
+    finally:
+        conn.close()
 
 
 def save_history(profile_id: str, history: list[dict]) -> bool:
-    """Write history.json for this profile and update cache (atomic write). Returns True on success, False on write error (logged)."""
+    """Replace history for this profile_id with the given list (last N only) and update cache."""
     _ensure_profile_dir(profile_id)
-    path = _path(profile_id, "history.json")
-    path_tmp = path + ".tmp"
+    trimmed = history[-MAX_HISTORY_MESSAGES:] if len(history) > MAX_HISTORY_MESSAGES else history
+    conn = sqlite3.connect(DB_PATH)
     try:
-        with open(path_tmp, "w", encoding="utf-8") as f:
-            json.dump(history, f, indent=2)
-        os.replace(path_tmp, path)
-        _history_cache[profile_id] = copy.deepcopy(history)
+        conn.execute("DELETE FROM history WHERE profile_id = ?", (profile_id,))
+        for seq, entry in enumerate(trimmed, start=1):
+            if isinstance(entry, dict) and entry.get("role") in ("user", "assistant") and isinstance(entry.get("content"), str):
+                content_stored = _encrypt_cell(entry["content"]) or ""
+                conn.execute(
+                    "INSERT INTO history (profile_id, seq, role, content) VALUES (?, ?, ?, ?)",
+                    (profile_id, seq, entry["role"], content_stored),
+                )
+        conn.commit()
+        _history_cache[profile_id] = copy.deepcopy(trimmed)
         return True
-    except OSError as e:
-        logger.exception("Failed to save history.json for profile_id=%s: %s", profile_id, e)
-        if os.path.isfile(path_tmp):
-            try:
-                os.remove(path_tmp)
-            except OSError:
-                pass
+    except sqlite3.Error as e:
+        logger.exception("Failed to save history for profile_id=%s: %s", profile_id, e)
         return False
+    finally:
+        conn.close()
 
 
 def trim_history(history: list[dict]) -> list[dict]:

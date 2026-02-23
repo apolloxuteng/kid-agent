@@ -77,18 +77,17 @@ To use **POST /chat/stream** from the iOS app for lower perceived latency:
 
 No backend changes are required beyond calling `/chat/stream` instead of `/chat`; history and profile updates behave the same.
 
-## Per-profile data (no database)
+## Per-profile data (SQLite + optional encryption)
 
-- Each child is identified by **profile_id** (e.g. the app’s UUID for that profile). Data is stored under **`data/profiles/{profile_id}/`**:
-  - **profile.json** — name and interests (updated from messages)
-  - **summary.txt** — short conversation summary (updated every 6 messages)
-  - **history.json** — recent messages for context
-- The folder is **created automatically** when a profile is first used (e.g. first chat with that profile_id). No setup required.
+- Each child is identified by **profile_id** (e.g. the app’s UUID for that profile). Data is stored in a single **SQLite database** at **`data/kid_agent.db`** (tables: profiles, summaries, history).
+- **Encryption at rest:** Set the environment variable **`KID_AGENT_DB_KEY`** to a Fernet key to encrypt sensitive columns (name, interests, summary, message content). Generate a key with Python: `from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())`. Losing this key means encrypted data cannot be recovered; keep backups of the key and DB file secure.
+- If `KID_AGENT_DB_KEY` is not set, data is stored in plaintext (existing DB rows remain readable).
 - **Memory is isolated per profile**: history and summary for one child never affect another. Resetting or clearing is per profile_id.
+- **Migration from file-based storage:** If you had data in `data/profiles/` before switching to SQLite, run once: `python scripts/migrate_to_sqlite.py` from the backend directory (with the server stopped). This copies existing profile.json, summary.txt, and history.json into the database.
 
 ## Conversation memory
 
-- For each profile, the server **loads** that profile’s history and summary from disk, builds the prompt (system + profile + summary + last 6 messages), calls the LLM, then **saves** updated history and summary back to that profile’s folder.
+- For each profile, the server **loads** that profile’s history and summary from the database, builds the prompt (system + profile + summary + last 6 messages), calls the LLM, then **saves** updated history and summary back to the database.
 - History is **capped at 50 messages** per profile; a short summary is updated every 6 messages so context stays bounded without sending the full history every time.
 - **POST /reset?profile_id=...** clears history and summary for that profile only.
 
@@ -100,12 +99,42 @@ No backend changes are required beyond calling `/chat/stream` instead of `/chat`
 
 ## Configuration
 
-In `server.py` you can change:
-
-- `OLLAMA_URL` — default `http://localhost:11434/api/generate`
-- `MODEL_NAME` — default `llama3`
+- **Environment:** `KID_AGENT_DB_KEY` — optional Fernet key for encrypting stored data (see Per-profile data above). You can put it in a **`backend/.env`** file (loaded automatically; do not commit `.env`). See [Moving the server to another machine](#moving-the-server-to-another-machine-eg-via-github) if you deploy or clone the repo elsewhere.
+- In `server.py` you can change:
+  - `OLLAMA_URL` — default `http://localhost:11434/api/generate`
+  - `MODEL_NAME` — default `llama3`
 
 Make sure Ollama is running and the model is pulled before calling `/chat`.
+
+## Moving the server to another machine (e.g. via GitHub)
+
+When you clone or copy this repo to a **new server**, the following are **not** in the repo (they are in `.gitignore`):
+
+- **`.env`** — contains `KID_AGENT_DB_KEY`; never commit this file.
+- **`data/`** — the SQLite database and any legacy `data/profiles/` folders.
+
+**To run successfully on the new server:**
+
+1. **Clone/copy the repo** (e.g. from GitHub) and install dependencies:
+   ```bash
+   cd kid-agent/backend
+   python3 -m venv venv && source venv/bin/activate
+   pip install -r requirements.txt
+   ```
+
+2. **Encryption key (only if you need it):**
+   - **If you are copying the existing database** (`data/kid_agent.db`) to the new server and want to read that data: create a **`.env`** file in the `backend` folder and set the **same** key you used on the old server:
+     ```bash
+     # In backend/.env (create this file on the new server)
+     KID_AGENT_DB_KEY=<paste your Fernet key here>
+     ```
+     Transfer the key securely (e.g. password manager, secure channel). Do **not** put it in GitHub.
+   - **If you are starting fresh** (no copied database): the server runs without a key (data stored in plaintext). You can optionally generate a new key and add it to `.env` if you want encryption on the new server.
+
+3. **Database on the new server:**  
+   If you did not copy `data/kid_agent.db`, the server will create a new empty database on first run. If you did copy the DB, ensure the same `KID_AGENT_DB_KEY` is in `.env` so encrypted data can be decrypted.
+
+4. **Run the server** as usual (`uvicorn server:app --reload`). The server loads `backend/.env` automatically if present.
 
 ## Troubleshooting
 
