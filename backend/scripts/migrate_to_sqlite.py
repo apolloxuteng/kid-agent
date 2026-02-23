@@ -12,11 +12,14 @@ import json
 import os
 import sys
 
-# Ensure backend root is on path so we can import server
+# Ensure backend root is on path and load .env before importing db (so KID_AGENT_DB_KEY is set)
 _backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _backend_dir)
 
-from server import (
+from dotenv import load_dotenv
+load_dotenv(os.path.join(_backend_dir, ".env"))
+
+from db import (
     DATA_DIR,
     PROFILES_ROOT,
     init_db,

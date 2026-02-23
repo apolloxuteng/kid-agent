@@ -29,13 +29,13 @@ pip install -r requirements.txt
 
 ```bash
 source venv/bin/activate
-uvicorn server:app --reload
+uvicorn server:app --reload --host 0.0.0.0
 ```
 
 Or run uvicorn via the venv’s Python (no activate needed):
 
 ```bash
-./venv/bin/uvicorn server:app --reload
+./venv/bin/uvicorn server:app --reload --host 0.0.0.0
 ```
 
 The API will be available at **http://localhost:8000**.
@@ -134,19 +134,20 @@ When you clone or copy this repo to a **new server**, the following are **not** 
 3. **Database on the new server:**  
    If you did not copy `data/kid_agent.db`, the server will create a new empty database on first run. If you did copy the DB, ensure the same `KID_AGENT_DB_KEY` is in `.env` so encrypted data can be decrypted.
 
-4. **Run the server** as usual (`uvicorn server:app --reload`). The server loads `backend/.env` automatically if present.
+4. **Run the server** as usual (`uvicorn server:app --reload --host 0.0.0.0`). The server loads `backend/.env` automatically if present.
 
 ## Troubleshooting
 
 **"ModuleNotFoundError: No module named 'httpx'"**
 
+
 The server needs `httpx` (and other deps) from the project venv. Use the venv when running:
 
 1. `cd kid-agent/backend && source venv/bin/activate`
 2. `pip install -r requirements.txt`  (if you just created the venv or added deps)
-3. `uvicorn server:app --reload`
+3. `uvicorn server:app --reload --host 0.0.0.0`
 
-If you use `--reload`, start uvicorn with the venv’s interpreter (e.g. `./venv/bin/uvicorn` or run `uvicorn` after `source venv/bin/activate`) so the reload subprocess sees the same packages.
+If you use `--reload`, start uvicorn with the venv’s interpreter (e.g. `./venv/bin/uvicorn server:app --reload --host 0.0.0.0` or run `uvicorn` after `source venv/bin/activate`) so the reload subprocess sees the same packages.
 
 **"Ollama request failed: 404 Client Error: Not Found for url: .../api/generate"**
 
