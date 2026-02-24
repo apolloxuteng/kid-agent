@@ -146,6 +146,16 @@ struct ContentView: View {
                     floatingEmoji = emoji
                 }
             }
+            .onChange(of: viewModel.messages.last?.text) { _ in
+                // Re-check when message text updates (streaming); emoji may appear only after "dog" etc. arrives.
+                guard let last = viewModel.messages.last, !last.isUser else { return }
+                if last.id == lastAnimatedMessageID { return }
+                if let emoji = FloatingEmojiKeywords.keywordEmoji(for: last.text) {
+                    lastAnimatedMessageID = last.id
+                    floatingEmojiOffset = 0
+                    floatingEmoji = emoji
+                }
+            }
             .navigationBarTitleDisplayMode(.inline)
             .navigationBarHidden(true)
             .onChange(of: profileManager.activeProfile?.id) { _ in
@@ -528,9 +538,14 @@ private enum FloatingEmojiKeywords {
         ("happy", "😊"), ("love", "❤️"), ("magic", "✨"),
     ]
 
+    /// Match whole words only so "man" doesn't trigger inside "many"/"woman", "person" not in "personal".
     static func keywordEmoji(for text: String) -> String? {
-        let lower = text.lowercased()
-        return pairs.first { lower.contains($0.keyword) }?.emoji
+        let words = text.lowercased()
+            .split(whereSeparator: { $0.isWhitespace || $0.isPunctuation })
+            .map { String($0) }
+        return pairs.first { pair in
+            words.contains { $0 == pair.keyword }
+        }?.emoji
     }
 }
 

@@ -157,7 +157,7 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     conversation_history.append({"role": "assistant", "content": llm_reply})
     conversation_history = db.trim_history(conversation_history)
 
-    if len(conversation_history) >= 6 and len(conversation_history) % 6 == 0:
+    if len(conversation_history) >= llm.RECENT_MESSAGES_COUNT and len(conversation_history) % llm.RECENT_MESSAGES_COUNT == 0:
         background_tasks.add_task(
             _run_summary_in_background,
             profile_id,
@@ -191,7 +191,7 @@ async def _stream_chat_sse(
         conversation_history.append({"role": "assistant", "content": llm_reply})
         trimmed = db.trim_history(conversation_history)
 
-        if len(trimmed) >= 6 and len(trimmed) % 6 == 0:
+        if len(trimmed) >= llm.RECENT_MESSAGES_COUNT and len(trimmed) % llm.RECENT_MESSAGES_COUNT == 0:
             background_tasks.add_task(
                 _run_summary_in_background,
                 profile_id,

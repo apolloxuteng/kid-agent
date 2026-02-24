@@ -87,8 +87,8 @@ No backend changes are required beyond calling `/chat/stream` instead of `/chat`
 
 ## Conversation memory
 
-- For each profile, the server **loads** that profile’s history and summary from the database, builds the prompt (system + profile + summary + last 6 messages), calls the LLM, then **saves** updated history and summary back to the database.
-- History is **capped at 50 messages** per profile; a short summary is updated every 6 messages so context stays bounded without sending the full history every time.
+- For each profile, the server **loads** that profile’s history and summary from the database, builds the prompt (system + profile + summary + last 10 messages), calls the LLM, then **saves** updated history and summary back to the database.
+- History is **capped at 100 messages** per profile; a short summary is updated every 10 messages so context stays bounded without sending the full history every time.
 - **POST /reset?profile_id=...** clears history and summary for that profile only.
 
 ## Child profile (per profile_id)

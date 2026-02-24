@@ -30,7 +30,7 @@ def _env_int(key: str, default: int) -> int:
         return default
 
 
-MAX_HISTORY_MESSAGES = _env_int("MAX_HISTORY_MESSAGES", 50)
+MAX_HISTORY_MESSAGES = _env_int("MAX_HISTORY_MESSAGES", 100)
 MAX_CACHED_PROFILES = _env_int("MAX_CACHED_PROFILES", 20)
 
 _profile_cache: dict[str, dict] = {}
