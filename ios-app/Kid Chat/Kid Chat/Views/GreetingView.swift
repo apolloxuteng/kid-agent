@@ -41,6 +41,8 @@ struct GreetingView: View {
 
     /// Called when the user taps a button. Pass the chosen mode so chat can start accordingly.
     var onStartChat: (GreetingStarter) -> Void
+    /// Called when the user taps the back button to return to profile selection (choose user / add users).
+    var onBackToProfileSelection: () -> Void
 
     /// Large avatar size so kids easily recognize "me" or "my character."
     private let avatarFontSize: CGFloat = 96
@@ -59,6 +61,22 @@ struct GreetingView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 28) {
+                // Return to profile selection (top left) — same pill style and position as Mode button in chat
+                HStack {
+                    Button(action: onBackToProfileSelection) {
+                        Label("Back", systemImage: "chevron.left")
+                            .font(.system(size: 16, weight: .medium, design: .rounded))
+                    }
+                    .modifier(ThemedHeaderButtonModifier(accentGradient: conversationSettings.accentGradient))
+                    .accessibilityLabel("Back to profile selection")
+                    .accessibilityHint("Returns to the screen where you choose or add a user")
+                    Spacer(minLength: 0)
+                }
+                .padding(.leading, 12)
+                .padding(.trailing, 4)
+                .padding(.top, 8)
+                .padding(.bottom, 4)
+
                 Spacer()
 
                 // Big profile avatar (or default bear) — visible and personal
@@ -171,7 +189,7 @@ private struct GreetingButtonTapStyle: ButtonStyle {
 // MARK: - Preview
 
 #Preview {
-    GreetingView(onStartChat: { _ in })
+    GreetingView(onStartChat: { _ in }, onBackToProfileSelection: {})
         .environmentObject(ConversationSettings())
         .environmentObject(ProfileManager())
 }

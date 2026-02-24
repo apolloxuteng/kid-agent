@@ -91,7 +91,10 @@ class ChatViewModel: ObservableObject {
     init() {
         speechManager.onDidFinishSpeaking = { [weak self] in
             Task { @MainActor in
-                self?.conversationState = .idle
+                // Only clear to idle if we're still in speaking; if user interrupted and started talking (.listening), keep mic red until they're done.
+                if self?.conversationState == .speaking {
+                    self?.conversationState = .idle
+                }
             }
         }
     }

@@ -8,6 +8,7 @@
 //
 
 import SwiftUI
+import UIKit
 
 // MARK: - Main view
 
@@ -40,10 +41,15 @@ struct ContentView: View {
                     appMode = .greeting
                 })
             case .greeting:
-                GreetingView(onStartChat: { starter in
-                    pendingStarter = starter
-                    appMode = .chatting
-                })
+                GreetingView(
+                    onStartChat: { starter in
+                        pendingStarter = starter
+                        appMode = .chatting
+                    },
+                    onBackToProfileSelection: {
+                        appMode = .selectProfile
+                    }
+                )
             case .chatting:
                 chatView
             }
@@ -205,11 +211,176 @@ struct ContentView: View {
         .padding(.bottom, 120)
     }
 
+    // MARK: - Typeahead (kid-friendly: tap to select, not Tab)
+
+    /// One suggestion chip: either complete the current word (replace) or append a phrase (next word).
+    private enum TypeaheadItem: Hashable {
+        case word(String)
+        case phrase(String)
+        var displayText: String {
+            switch self {
+            case .word(let s): return s
+            case .phrase(let s): return s
+            }
+        }
+    }
+
+    /// Words offered as tap-to-select completions for the current word. Kid-friendly and common.
+    private static let typeaheadWords: [String] = [
+        "congratulations", "hello", "hi", "please", "thanks", "thank you", "yes", "no",
+        "story", "stories", "joke", "jokes", "tell me", "what is", "how are you", "good morning", "good night",
+        "dinosaur", "dinosaurs", "animal", "animals", "dog", "cat", "bird", "friend", "friends",
+        "love", "happy", "sad", "cool", "awesome", "fun", "funny", "great", "amazing", "wow",
+        "question", "questions", "help", "something", "everything", "everyone", "today", "tomorrow",
+        "birthday", "present", "game", "play", "read", "book", "school", "home", "family",
+        "mom", "dad", "brother", "sister", "grandma", "grandpa", "teacher", "friend"
+    ]
+
+    /// After last word X, suggest these phrases (tap appends). Kid-focused next-word / phrase completions.
+    private static let typeaheadPhraseMap: [String: [String]] = [
+        "tell": ["me a story", "me a joke", "me something"],
+        "a": ["story", "joke", "funny story"],
+        "what": ["is", "are"],
+        "how": ["are you", "do you"],
+        "good": ["morning", "night", "afternoon"],
+        "thank": ["you"],
+        "I": ["want", "like", "love"],
+        "want": ["to hear", "to know", "a story"]
+    ]
+
+    /// Current word fragment being typed (last word in input, or whole input if no space).
+    private func currentWordPrefix(from text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let lastSpace = trimmed.lastIndex(of: " ") else { return trimmed }
+        return String(trimmed[trimmed.index(after: lastSpace)...])
+    }
+
+    /// Last complete token (word) in the input; used to look up phrase suggestions.
+    private func lastToken(from text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return trimmed.split(separator: " ").last.map(String.init)
+    }
+
+    /// Replaces the current word with the selected suggestion.
+    private func applyTypeaheadSuggestion(to text: String, suggestion: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let lastSpace = trimmed.lastIndex(of: " ") else { return suggestion }
+        let before = String(trimmed[..<lastSpace])
+        return before.isEmpty ? suggestion : before + " " + suggestion
+    }
+
+    /// Appends a phrase suggestion to the text (one space between).
+    private func applyPhraseSuggestion(to text: String, phrase: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? phrase : trimmed + " " + phrase
+    }
+
+    /// Phrase/next-word suggestions when the last token matches a key (e.g. "tell" → "me a story").
+    private func phraseSuggestions(for lastWord: String?) -> [String] {
+        guard let word = lastWord, !word.isEmpty else { return [] }
+        let key = word.lowercased()
+        return ContentView.typeaheadPhraseMap[key] ?? []
+    }
+
+    /// Merged suggestions: kid list first (prefix match), then UITextChecker completions; deduped, up to 8.
+    /// Min prefix length 1 so slow typers see suggestions earlier.
+    private func mergedWordSuggestions(prefix: String, fullText: String) -> [String] {
+        guard !prefix.isEmpty else { return [] }
+        let lower = prefix.lowercased()
+
+        // Kid list first (prioritized for relevance)
+        let kidMatches = ContentView.typeaheadWords.filter { $0.lowercased().hasPrefix(lower) }
+
+        // System completions (UITextChecker: system dictionary + learned words)
+        var systemCompletions: [String] = []
+        let trimmed = fullText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            let rangeStart: String.Index
+            if let lastSpace = trimmed.lastIndex(of: " ") {
+                rangeStart = trimmed.index(after: lastSpace)
+            } else {
+                rangeStart = trimmed.startIndex
+            }
+            let range = rangeStart..<trimmed.endIndex
+            let nsRange = NSRange(range, in: trimmed)
+            systemCompletions = UITextChecker().completions(forPartialWordRange: nsRange, in: trimmed, language: "en") ?? []
+        }
+        systemCompletions = systemCompletions.filter { $0.lowercased().hasPrefix(lower) }
+
+        // Merge: kid first, then system, dedupe (case-insensitive), cap 8
+        var seen = Set<String>()
+        var result: [String] = []
+        for w in kidMatches {
+            let l = w.lowercased()
+            if !seen.contains(l) { seen.insert(l); result.append(w) }
+        }
+        for w in systemCompletions {
+            let l = w.lowercased()
+            if !seen.contains(l) { seen.insert(l); result.append(w) }
+        }
+        return Array(result.prefix(8))
+    }
+
+    /// Combined suggestions: word completions (current word) + phrase/next-word when last token matches. Tap to select only.
+    /// Word completions first (kid list + UITextChecker), then phrase suggestions; total cap 8.
+    private var typeaheadSuggestions: [TypeaheadItem] {
+        let text = viewModel.inputText
+        let prefix = currentWordPrefix(from: text)
+        let lastWord = lastToken(from: text)
+
+        var items: [TypeaheadItem] = []
+        if !prefix.isEmpty {
+            items = mergedWordSuggestions(prefix: prefix, fullText: text).map { .word($0) }
+        }
+        let phraseList = phraseSuggestions(for: lastWord).map { TypeaheadItem.phrase($0) }
+        items += phraseList
+        return Array(items.prefix(8))
+    }
+
+    /// Current word prefix for typeahead; used so the suggestion row explicitly depends on input and updates as user types.
+    private var typeaheadPrefix: String {
+        currentWordPrefix(from: viewModel.inputText)
+    }
+
     // MARK: - Input bar (text field + send)
 
     private var inputBar: some View {
-        HStack(alignment: .bottom, spacing: 12) {
-            TextField("Message", text: $viewModel.inputText, axis: .vertical)
+        VStack(alignment: .leading, spacing: 8) {
+            // Typeahead: tap to select a word or phrase (kid-friendly, no Tab); updates as user types.
+            if !typeaheadSuggestions.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(typeaheadSuggestions, id: \.self) { item in
+                            Button {
+                                switch item {
+                                case .word(let s):
+                                    viewModel.inputText = applyTypeaheadSuggestion(to: viewModel.inputText, suggestion: s)
+                                case .phrase(let s):
+                                    viewModel.inputText = applyPhraseSuggestion(to: viewModel.inputText, phrase: s)
+                                }
+                            } label: {
+                                Text(item.displayText)
+                                    .font(.system(size: 15, weight: .medium, design: .rounded))
+                                    .foregroundStyle(KidTheme.bubbleTextAI)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 8)
+                                    .background(Color.white.opacity(0.95))
+                                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Use \(item.displayText)")
+                            .accessibilityHint("Tap to insert")
+                        }
+                    }
+                    .padding(.horizontal, 2)
+                }
+                .frame(height: 40)
+                .id(typeaheadPrefix)
+            }
+
+            HStack(alignment: .bottom, spacing: 12) {
+                TextField("Message", text: $viewModel.inputText, axis: .vertical)
                 .font(.system(size: 18, weight: .medium, design: .rounded))
                 .foregroundStyle(KidTheme.bubbleTextAI)
                 .textFieldStyle(.plain)
@@ -239,30 +410,31 @@ struct ContentView: View {
                     }
                 }
 
-            Button {
-                // Visible celebration: scale up then spring back so kids see "my message was sent"
-                withAnimation(.spring(response: 0.25, dampingFraction: 0.6)) {
-                    sendButtonScale = 1.2
-                }
-                viewModel.sendMessage()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
-                        sendButtonScale = 1.0
+                Button {
+                    // Visible celebration: scale up then spring back so kids see "my message was sent"
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.6)) {
+                        sendButtonScale = 1.2
                     }
+                    viewModel.sendMessage()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
+                            sendButtonScale = 1.0
+                        }
+                    }
+                } label: {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.system(size: 36))
+                        .foregroundStyle(conversationSettings.accentGradient)
+                        .scaleEffect(sendButtonScale)
                 }
-            } label: {
-                Image(systemName: "arrow.up.circle.fill")
-                    .font(.system(size: 36))
-                    .foregroundStyle(conversationSettings.accentGradient)
-                    .scaleEffect(sendButtonScale)
+                .accessibilityLabel("Send message")
+                .accessibilityHint("Sends your message to the assistant")
+                .disabled(
+                    viewModel.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || viewModel.isLoading
+                    || viewModel.conversationState == .speaking
+                )
             }
-            .accessibilityLabel("Send message")
-            .accessibilityHint("Sends your message to the assistant")
-            .disabled(
-                viewModel.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                || viewModel.isLoading
-                || viewModel.conversationState == .speaking
-            )
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
@@ -305,10 +477,9 @@ struct ContentView: View {
 
     private var micButton: some View {
         LargeMicButton(state: viewModel.conversationState, onTap: {
-            // If agent is speaking, tap stops TTS (useful for long replies)
+            // If agent is speaking, one tap stops TTS and immediately starts listening
             if viewModel.conversationState == .speaking {
                 viewModel.stopSpeaking()
-                return
             }
             if !speechRecognizer.isRecording {
                 viewModel.setConversationState(.listening)
@@ -319,10 +490,10 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Themed header button (pill with accent gradient, used for Mode and Settings)
+// MARK: - Themed header button (pill with accent gradient, used for Mode, Settings, and Back)
 
 /// Applies theme accent gradient, pill shape, and soft shadow so header buttons match the selected theme.
-private struct ThemedHeaderButtonModifier: ViewModifier {
+struct ThemedHeaderButtonModifier: ViewModifier {
     let accentGradient: LinearGradient
 
     func body(content: Content) -> some View {
