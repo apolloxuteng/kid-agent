@@ -14,7 +14,7 @@ import SwiftUI
 enum AppMode {
     /// Initial screen: choose which profile to use (or add one).
     case selectProfile
-    /// Welcome screen with four mode buttons (Story, Knowledge, Question, Joke).
+    /// Welcome screen with six mode buttons (Story, Knowledge, Question, Joke, Space, Quiz).
     case greeting
     /// Chat screen.
     case chatting
@@ -30,6 +30,10 @@ enum GreetingStarter {
     case question
     /// Server starts the conversation with a funny joke.
     case joke
+    /// Server shows today's astronomy picture of the day (NASA APOD).
+    case space
+    /// Server asks a trivia/quiz question (Open Trivia DB).
+    case quiz
 }
 
 // MARK: - Greeting view
@@ -100,14 +104,20 @@ struct GreetingView: View {
 
                 Spacer()
 
-                // Four mode buttons: visible pop-in and tap feedback
-                VStack(spacing: 12) {
-                    greetingButton(emoji: "📖", title: "Story Mode", subtitle: "Get a funny story", starter: .story, delay: 0)
-                    greetingButton(emoji: "🌍", title: "Knowledge Mode", subtitle: "Learn about a country, person, or place", starter: .knowledge, delay: 0.08)
-                    greetingButton(emoji: "❓", title: "Question Mode", subtitle: "Ask me anything", starter: .question, delay: 0.16)
-                    greetingButton(emoji: "😂", title: "Joke Mode", subtitle: "Hear a funny joke", starter: .joke, delay: 0.24)
+                // Six mode buttons: 3×2 grid, visible pop-in and tap feedback
+                LazyVGrid(columns: [
+                    GridItem(.flexible(), spacing: 10),
+                    GridItem(.flexible(), spacing: 10),
+                    GridItem(.flexible(), spacing: 10),
+                ], spacing: 10) {
+                    greetingButton(emoji: "📖", title: "Story", subtitle: "Funny story", starter: .story, delay: 0)
+                    greetingButton(emoji: "🌍", title: "Knowledge", subtitle: "Fact of the world", starter: .knowledge, delay: 0.05)
+                    greetingButton(emoji: "❓", title: "Question", subtitle: "Ask anything", starter: .question, delay: 0.10)
+                    greetingButton(emoji: "😂", title: "Joke", subtitle: "Funny joke", starter: .joke, delay: 0.15)
+                    greetingButton(emoji: "🪐", title: "Space", subtitle: "Astronomy picture", starter: .space, delay: 0.20)
+                    greetingButton(emoji: "🧩", title: "Quiz", subtitle: "Trivia question", starter: .quiz, delay: 0.25)
                 }
-                .padding(.horizontal, 24)
+                .padding(.horizontal, 20)
                 .padding(.bottom, 48)
             }
         }
@@ -133,27 +143,27 @@ struct GreetingView: View {
     @State private var subtitleOpacity: Double = 0
     @State private var subtitleOffset: CGFloat = 8
 
-    /// One rounded button with optional subtitle; visible pop-in and tap bounce.
+    /// One rounded button with optional subtitle; visible pop-in and tap bounce. Layout fits 3×2 grid.
     private func greetingButton(emoji: String, title: String, subtitle: String, starter: GreetingStarter, delay: Double) -> some View {
         Button(action: { onStartChat(starter) }) {
-            HStack(spacing: 12) {
+            VStack(spacing: 6) {
                 Text(emoji)
-                    .font(.system(size: 26))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.system(size: 18, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white)
-                    Text(subtitle)
-                        .font(.system(size: 13, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.9))
-                }
-                Spacer(minLength: 0)
+                    .font(.system(size: 28))
+                Text(title)
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                Text(subtitle)
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
             }
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 14)
-            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .padding(.horizontal, 8)
             .background(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .fill(conversationSettings.accentGradient)
             )
             .shadow(color: .black.opacity(0.12), radius: 6, x: 0, y: 3)

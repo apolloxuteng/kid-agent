@@ -84,7 +84,7 @@ struct ContentView: View {
                         }
                         .modifier(ThemedHeaderButtonModifier(accentGradient: conversationSettings.accentGradient))
                         .accessibilityLabel("Back to mode selection")
-                        .accessibilityHint("Returns to choose Story, Knowledge, Question, or Joke mode and starts a new conversation")
+                        .accessibilityHint("Returns to choose Story, Knowledge, Question, Joke, Space, or Quiz mode and starts a new conversation")
                         Spacer(minLength: 0)
                         Button(action: { showSettings = true }) {
                             Image(systemName: "gearshape")
@@ -197,6 +197,12 @@ struct ContentView: View {
                         break // Kid asks questions; no auto-send
                     case .joke:
                         viewModel.inputText = "Tell me a funny joke"
+                        viewModel.sendMessage()
+                    case .space:
+                        viewModel.inputText = "Show me the astronomy picture of the day"
+                        viewModel.sendMessage()
+                    case .quiz:
+                        viewModel.inputText = "Give me a quiz question"
                         viewModel.sendMessage()
                     }
                     pendingStarter = nil

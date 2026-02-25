@@ -36,8 +36,10 @@ import httpx
 
 from apis import facts as facts_api
 from apis import joke as joke_api
+from apis import nasa_apod as nasa_apod_api
 from apis import pixabay as pixabay_api
 from apis import stories as stories_api
+from apis import trivia as trivia_api
 import config
 import db
 import llm
@@ -57,8 +59,19 @@ class ChatContext:
     image_data: tuple[bytes, str] | None  # (image_bytes, media_type) when user asked for an image
 
 
-async def compute_chat_context(user_message: str, profile_id: str) -> ChatContext:
-    """Decide direct reply vs LLM and fetch joke/story/fact/image. Used by both /chat and /chat/stream."""
+def _last_assistant_message(conversation_history: list[dict]) -> str | None:
+    """Return the content of the most recent assistant message, or None."""
+    for m in reversed(conversation_history):
+        if m.get("role") == "assistant":
+            return (m.get("content") or "").strip() or None
+    return None
+
+
+async def compute_chat_context(
+    user_message: str, profile_id: str, last_assistant_message: str | None = None
+) -> ChatContext:
+    """Decide direct reply vs LLM and fetch joke/story/fact/image. Used by both /chat and /chat/stream.
+    last_assistant_message is used to treat follow-ups like 'one more picture' as Space when the last reply was space."""
     direct_reply: str | None = None
     injected_fact: str | None = None
     story_seed: str | None = None
@@ -86,6 +99,23 @@ async def compute_chat_context(user_message: str, profile_id: str) -> ChatContex
         injected_fact = await facts_api.fetch_random_fact()
         if injected_fact:
             logger.info("Fact requested; injecting fact for LLM to explain (profile_id=%s)", profile_id)
+    elif nasa_apod_api.user_asking_for_space(user_message, last_assistant_message):
+        # Check Space (NASA APOD) before Pixabay so "astronomy picture of the day" uses NASA, not Pixabay
+        use_random_date = bool(
+            last_assistant_message
+            and nasa_apod_api.last_message_suggests_space(last_assistant_message)
+            and nasa_apod_api.user_asking_for_another_picture(user_message)
+        )
+        apod_result = await nasa_apod_api.fetch_apod(use_random_date=use_random_date)
+        if apod_result:
+            img_bytes, img_media_type, title, explanation = apod_result
+            logger.info("Space requested; returning NASA APOD (profile_id=%s)", profile_id)
+            first_sentence = explanation.split(".")[0].strip() + "." if explanation else ""
+            if use_random_date:
+                direct_reply = f"Here's another space picture! {title}. {first_sentence}" if first_sentence else f"Here's another space picture! {title}"
+            else:
+                direct_reply = f"Here's today's space picture! {title}. {first_sentence}" if first_sentence else f"Here's today's space picture! {title}"
+            image_data = (img_bytes, img_media_type)
     elif pixabay_api.user_asking_for_image(user_message):
         keywords = await llm.extract_image_search_keywords(user_message)
         image_result = await pixabay_api.fetch_image(keywords)
@@ -93,6 +123,11 @@ async def compute_chat_context(user_message: str, profile_id: str) -> ChatContex
             logger.info("Image requested; returning Pixabay image (profile_id=%s)", profile_id)
             direct_reply = "Here's a picture for you!"
             image_data = image_result
+    elif trivia_api.user_asking_for_quiz(user_message):
+        quiz_data = await trivia_api.fetch_quiz_question()
+        if quiz_data:
+            logger.info("Quiz requested; returning Open Trivia DB question (profile_id=%s)", profile_id)
+            direct_reply = trivia_api.format_quiz_for_reply(quiz_data)
 
     return ChatContext(direct_reply=direct_reply, injected_fact=injected_fact, story_seed=story_seed, image_data=image_data)
 
@@ -249,7 +284,8 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     conversation_history.append({"role": "user", "content": user_message})
     conversation_history = db.trim_history(conversation_history)
 
-    ctx = await compute_chat_context(user_message, profile_id)
+    last_assistant = _last_assistant_message(conversation_history)
+    ctx = await compute_chat_context(user_message, profile_id, last_assistant_message=last_assistant)
 
     if ctx.direct_reply is not None:
         llm_reply = ctx.direct_reply
@@ -337,7 +373,8 @@ async def chat_stream(request: ChatRequest, background_tasks: BackgroundTasks):
     conversation_history.append({"role": "user", "content": user_message})
     conversation_history = db.trim_history(conversation_history)
 
-    ctx = await compute_chat_context(user_message, profile_id)
+    last_assistant = _last_assistant_message(conversation_history)
+    ctx = await compute_chat_context(user_message, profile_id, last_assistant_message=last_assistant)
 
     if ctx.direct_reply is not None:
         return await _stream_direct_reply(
