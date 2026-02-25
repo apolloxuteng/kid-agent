@@ -6,6 +6,7 @@ Profile data is stored in SQLite (data/kid_agent.db); sensitive columns
 are encrypted at rest when KID_AGENT_DB_KEY is set.
 """
 
+import base64
 import asyncio
 import json
 import logging
@@ -35,6 +36,7 @@ import httpx
 
 from apis import facts as facts_api
 from apis import joke as joke_api
+from apis import pixabay as pixabay_api
 from apis import stories as stories_api
 import config
 import db
@@ -48,17 +50,19 @@ MAX_EXTRACTED_LENGTH = config.MAX_EXTRACTED_LENGTH
 
 @dataclass
 class ChatContext:
-    """Result of computing joke/story/fact and whether to reply directly or use LLM."""
+    """Result of computing joke/story/fact/image and whether to reply directly or use LLM."""
     direct_reply: str | None
     injected_fact: str | None
     story_seed: str | None
+    image_data: tuple[bytes, str] | None  # (image_bytes, media_type) when user asked for an image
 
 
 async def compute_chat_context(user_message: str, profile_id: str) -> ChatContext:
-    """Decide direct reply vs LLM and fetch joke/story/fact. Used by both /chat and /chat/stream."""
+    """Decide direct reply vs LLM and fetch joke/story/fact/image. Used by both /chat and /chat/stream."""
     direct_reply: str | None = None
     injected_fact: str | None = None
     story_seed: str | None = None
+    image_data: tuple[bytes, str] | None = None
 
     if joke_api.user_asking_for_joke(user_message):
         joke = await joke_api.fetch_joke()
@@ -82,8 +86,15 @@ async def compute_chat_context(user_message: str, profile_id: str) -> ChatContex
         injected_fact = await facts_api.fetch_random_fact()
         if injected_fact:
             logger.info("Fact requested; injecting fact for LLM to explain (profile_id=%s)", profile_id)
+    elif pixabay_api.user_asking_for_image(user_message):
+        keywords = await llm.extract_image_search_keywords(user_message)
+        image_result = await pixabay_api.fetch_image(keywords)
+        if image_result:
+            logger.info("Image requested; returning Pixabay image (profile_id=%s)", profile_id)
+            direct_reply = "Here's a picture for you!"
+            image_data = image_result
 
-    return ChatContext(direct_reply=direct_reply, injected_fact=injected_fact, story_seed=story_seed)
+    return ChatContext(direct_reply=direct_reply, injected_fact=injected_fact, story_seed=story_seed, image_data=image_data)
 
 
 @asynccontextmanager
@@ -189,15 +200,24 @@ async def _stream_direct_reply(
     conversation_history: list[dict],
     conversation_summary: str,
     background_tasks: BackgroundTasks,
+    image_data: tuple[bytes, str] | None = None,
 ) -> StreamingResponse:
-    """Append reply to history, persist/summary via _append_assistant_and_save, return SSE stream (one token, one done)."""
+    """Append reply to history, persist/summary via _append_assistant_and_save, return SSE stream (one token, one done). Optionally include image_base64 and image_media_type in done event."""
     conversation_history.append({"role": "assistant", "content": reply})
     if not await _append_assistant_and_save(profile_id, conversation_history, conversation_summary, background_tasks):
         db.invalidate_history_cache(profile_id)
 
+    def _done_payload() -> dict:
+        payload: dict = {"done": True, "reply": reply}
+        if image_data is not None:
+            img_bytes, media_type = image_data
+            payload["image_base64"] = base64.b64encode(img_bytes).decode()
+            payload["image_media_type"] = media_type
+        return payload
+
     async def _events() -> typing.AsyncIterator[str]:
         yield f"data: {json.dumps({'token': reply})}\n\n"
-        yield f"data: {json.dumps({'done': True, 'reply': reply})}\n\n"
+        yield f"data: {json.dumps(_done_payload())}\n\n"
 
     return StreamingResponse(
         _events(),
@@ -253,6 +273,13 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     if not await _append_assistant_and_save(profile_id, conversation_history, conversation_summary, background_tasks):
         raise HTTPException(status_code=503, detail="Failed to save conversation.")
 
+    if ctx.image_data is not None:
+        img_bytes, media_type = ctx.image_data
+        return {
+            "reply": llm_reply,
+            "image_base64": base64.b64encode(img_bytes).decode(),
+            "image_media_type": media_type,
+        }
     return {"reply": llm_reply}
 
 
@@ -314,7 +341,12 @@ async def chat_stream(request: ChatRequest, background_tasks: BackgroundTasks):
 
     if ctx.direct_reply is not None:
         return await _stream_direct_reply(
-            ctx.direct_reply, profile_id, conversation_history, conversation_summary, background_tasks
+            ctx.direct_reply,
+            profile_id,
+            conversation_history,
+            conversation_summary,
+            background_tasks,
+            image_data=ctx.image_data,
         )
 
     full_prompt = llm.build_prompt(

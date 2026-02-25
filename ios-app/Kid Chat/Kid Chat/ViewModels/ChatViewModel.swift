@@ -15,16 +15,34 @@ private struct ChatRequest: Encodable {
 }
 
 /// Response body we get back from the backend (non-streaming /chat).
+/// When the user asked for an image and one was found, imageBase64 and imageMediaType are set.
 private struct ChatResponse: Decodable {
     let reply: String
+    let imageBase64: String?
+    let imageMediaType: String?
+
+    enum CodingKeys: String, CodingKey {
+        case reply
+        case imageBase64 = "image_base64"
+        case imageMediaType = "image_media_type"
+    }
 }
 
 /// SSE event from POST /chat/stream: either a token, done with reply, or error.
+/// When done includes an image (e.g. Pixabay), imageBase64 and imageMediaType are set.
 private struct StreamEvent: Decodable {
     var token: String?
     var done: Bool?
     var reply: String?
     var error: String?
+    var imageBase64: String?
+    var imageMediaType: String?
+
+    enum CodingKeys: String, CodingKey {
+        case token, done, reply, error
+        case imageBase64 = "image_base64"
+        case imageMediaType = "image_media_type"
+    }
 }
 
 /// Connects the UI to the chat backend: stores messages, handles send, updates UI.
@@ -40,8 +58,14 @@ class ChatViewModel: ObservableObject {
     static var streamURL: URL? { URL(string: SERVER_BASE + "/chat/stream") }
     /// Non-streaming fallback when streaming fails.
     static var chatURL: URL? { URL(string: SERVER_BASE + "/chat") }
+    /// Health check for connection retry (GET /health).
+    static var healthURL: URL? { URL(string: SERVER_BASE + "/health") }
     /// Keep only the last N messages to bound memory in long sessions.
     private static let maxMessages = 100
+    /// Request timeout so we don't stay in .thinking forever if the server hangs.
+    private static let requestTimeoutSeconds: UInt64 = 60
+    /// Interval between connection retries when server was unreachable.
+    private static let retryIntervalSeconds: UInt64 = 15
 
     // MARK: - Published state (SwiftUI observes these and redraws when they change)
 
@@ -75,6 +99,10 @@ class ChatViewModel: ObservableObject {
     private var streamingMessageId: UUID?
     /// In-flight request task; cancelled when user leaves chat or profile changes.
     private var currentRequestTask: Task<Void, Never>?
+    /// Timeout task: cancels the request and resets state if the request runs too long.
+    private var requestTimeoutTask: Task<Void, Never>?
+    /// Retry task: periodically pings server when connection was lost; cancelled when server is reachable again.
+    private var connectionRetryTask: Task<Void, Never>?
 
     /// Fun placeholder phrases while waiting for the reply (works for any message, not just questions).
     private static let thinkingPhrases = [
@@ -163,7 +191,24 @@ class ChatViewModel: ObservableObject {
     /// Performs POST /chat/stream, consumes SSE, and updates the placeholder message as tokens arrive.
     @MainActor
     private func performStreamingRequest(userMessageText: String, placeholderId: UUID) async {
+        requestTimeoutTask?.cancel()
+        requestTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.requestTimeoutSeconds * 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self else { return }
+                if self.isLoading {
+                    self.currentRequestTask?.cancel()
+                    self.requestTimeoutTask = nil
+                    self.isLoading = false
+                    if self.conversationState == .thinking { self.conversationState = .idle }
+                    self.replacePlaceholderAndShowError("Request timed out. Check that the server is running at \(ChatViewModel.SERVER_BASE).", connectionLost: true)
+                }
+            }
+        }
         defer {
+            requestTimeoutTask?.cancel()
+            requestTimeoutTask = nil
             isLoading = false
             streamingMessageId = nil
         }
@@ -171,7 +216,7 @@ class ChatViewModel: ObservableObject {
         if Task.isCancelled { return }
 
         guard let url = ChatViewModel.streamURL else {
-            replacePlaceholderAndShowError("Connection error. Please try again.")
+            replacePlaceholderAndShowError("Connection error. Please try again.", connectionLost: true)
             return
         }
 
@@ -186,12 +231,12 @@ class ChatViewModel: ObservableObject {
             let (bytes, response) = try await URLSession.shared.bytes(for: request)
 
             guard let http = response as? HTTPURLResponse else {
-                replacePlaceholderAndShowError("Connection error. Please try again.")
+                replacePlaceholderAndShowError("Connection error. Please try again.", connectionLost: true)
                 return
             }
             guard http.statusCode == 200 else {
                 let msg = "Server error (\(http.statusCode)). Check that the backend is running at \(ChatViewModel.SERVER_BASE)."
-                replacePlaceholderAndShowError(msg)
+                replacePlaceholderAndShowError(msg, connectionLost: true)
                 return
             }
 
@@ -236,10 +281,12 @@ class ChatViewModel: ObservableObject {
                         if !extraFromReply.isEmpty { speechManager.enqueueMore(String(extraFromReply)) }
                     }
                     if !hasStartedSpeaking && !speechManager.isMuted { conversationState = .speaking }
-                    replacePlaceholderWithFinalReply(placeholderId: placeholderId, replyText: reply, speak: false)
+                    let imageData = event?.imageBase64.flatMap { Data(base64Encoded: $0) }
+                    let imageMediaType = event?.imageMediaType
+                    replacePlaceholderWithFinalReply(placeholderId: placeholderId, replyText: reply, imageData: imageData, imageMediaType: imageMediaType, speak: false)
                     return
                 } else if let errorMsg = event?.error, !errorMsg.isEmpty {
-                    replacePlaceholderAndShowError(errorMsg)
+                    replacePlaceholderAndShowError(errorMsg, connectionLost: false)
                     return
                 }
             }
@@ -250,7 +297,7 @@ class ChatViewModel: ObservableObject {
                 if !hasStartedSpeaking && !speechManager.isMuted { conversationState = .speaking }
                 replacePlaceholderWithFinalReply(placeholderId: placeholderId, replyText: accumulated, speak: false)
             } else {
-                replacePlaceholderAndShowError("No reply from server.")
+                replacePlaceholderAndShowError("No reply from server.", connectionLost: true)
             }
         } catch {
             await fallbackToNonStreaming(userMessageText: userMessageText, placeholderId: placeholderId, streamError: error)
@@ -261,7 +308,7 @@ class ChatViewModel: ObservableObject {
     @MainActor
     private func fallbackToNonStreaming(userMessageText: String, placeholderId: UUID, streamError: Error) async {
         guard let url = ChatViewModel.chatURL else {
-            replacePlaceholderAndShowError(connectionErrorMessage(for: streamError))
+            replacePlaceholderAndShowError(connectionErrorMessage(for: streamError), connectionLost: true)
             return
         }
         var request = URLRequest(url: url)
@@ -274,14 +321,16 @@ class ChatViewModel: ObservableObject {
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-                replacePlaceholderAndShowError("Server error. Check \(ChatViewModel.SERVER_BASE) and try again.")
+                replacePlaceholderAndShowError("Server error. Check \(ChatViewModel.SERVER_BASE) and try again.", connectionLost: true)
                 return
             }
             let decoded = try? JSONDecoder().decode(ChatResponse.self, from: data)
             let replyText = decoded?.reply ?? "No reply from server."
-            replacePlaceholderWithFinalReply(placeholderId: placeholderId, replyText: replyText)
+            let imageData = decoded?.imageBase64.flatMap { Data(base64Encoded: $0) }
+            let imageMediaType = decoded?.imageMediaType
+            replacePlaceholderWithFinalReply(placeholderId: placeholderId, replyText: replyText, imageData: imageData, imageMediaType: imageMediaType)
         } catch {
-            replacePlaceholderAndShowError(connectionErrorMessage(for: streamError))
+            replacePlaceholderAndShowError(connectionErrorMessage(for: streamError), connectionLost: true)
         }
     }
 
@@ -301,6 +350,45 @@ class ChatViewModel: ObservableObject {
             }
         }
         return "Connection error: \(error.localizedDescription)"
+    }
+
+    /// Returns true if the server responds to GET /health with 200. Used for retry-after-disconnect.
+    func checkServerReachability() async -> Bool {
+        guard let url = ChatViewModel.healthURL else { return false }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 8
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return false }
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Call when connection error was shown: start periodic retry. When server is reachable again, reset state so mic is available.
+    private func startConnectionRetryLoop() {
+        connectionRetryTask?.cancel()
+        connectionRetryTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: Self.retryIntervalSeconds * 1_000_000_000)
+                if Task.isCancelled { break }
+                guard let self else { return }
+                let reachable = await self.checkServerReachability()
+                if reachable {
+                    await MainActor.run {
+                        self.connectionRetryTask?.cancel()
+                        self.connectionRetryTask = nil
+                        self.isLoading = false
+                        if self.conversationState == .thinking {
+                            self.conversationState = .idle
+                        }
+                    }
+                    break
+                }
+            }
+        }
     }
 
     /// Returns the next chunk of text that ends in a sentence boundary (. ! ?), and the end index.
@@ -329,10 +417,12 @@ class ChatViewModel: ObservableObject {
     }
 
     /// Replaces the streaming placeholder with the final reply. If speak is true, speaks the full reply (e.g. non-streaming fallback).
-    private func replacePlaceholderWithFinalReply(placeholderId: UUID, replyText: String, speak: Bool = true) {
+    /// When imageData/imageMediaType are provided (e.g. from Pixabay), the message is shown with the image in the bubble.
+    private func replacePlaceholderWithFinalReply(placeholderId: UUID, replyText: String, imageData: Data? = nil, imageMediaType: String? = nil, speak: Bool = true) {
         removeThinkingPlaceholderIfNeeded()
+        let finalMessage = ChatMessage(id: placeholderId, text: replyText, isUser: false, imageData: imageData, imageMediaType: imageMediaType)
         guard let idx = messages.lastIndex(where: { $0.id == placeholderId }) else {
-            messages.append(ChatMessage(id: UUID(), text: replyText, isUser: false))
+            messages.append(finalMessage)
             trimMessagesIfNeeded()
             if !speechManager.isMuted {
                 conversationState = .speaking
@@ -344,7 +434,7 @@ class ChatViewModel: ObservableObject {
             thinkingEndTime = nil
             return
         }
-        messages[idx] = ChatMessage(id: placeholderId, text: replyText, isUser: false)
+        messages[idx] = finalMessage
         if !speechManager.isMuted {
             conversationState = .speaking
         } else {
@@ -356,26 +446,33 @@ class ChatViewModel: ObservableObject {
     }
 
     /// After the thinking delay, replace the placeholder with an error message and speak it.
-    private func replacePlaceholderAndShowError(_ errorText: String) {
+    /// When connectionLost is true, starts a periodic retry loop; when server is reachable again, resets state so the mic is available.
+    private func replacePlaceholderAndShowError(_ errorText: String, connectionLost: Bool = false) {
+        isLoading = false
         guard let endTime = thinkingEndTime else {
             let errorMessage = ChatMessage(id: UUID(), text: errorText, isUser: false)
             messages.append(errorMessage)
             trimMessagesIfNeeded()
+            if conversationState == .thinking { conversationState = .idle }
             if !speechManager.isMuted { conversationState = .speaking }
             speechManager.speak(errorText)
+            if connectionLost { startConnectionRetryLoop() }
             return
         }
         let delay = max(0, endTime.timeIntervalSinceNow)
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
+            self.isLoading = false
             self.removeThinkingPlaceholderIfNeeded()
             let errorMessage = ChatMessage(id: UUID(), text: errorText, isUser: false)
             self.messages.append(errorMessage)
             self.trimMessagesIfNeeded()
+            if self.conversationState == .thinking { self.conversationState = .idle }
             if !self.speechManager.isMuted { self.conversationState = .speaking }
             self.speechManager.speak(errorText)
             self.lastThinkingPlaceholderText = nil
             self.thinkingEndTime = nil
+            if connectionLost { self.startConnectionRetryLoop() }
         }
     }
 

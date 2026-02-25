@@ -67,6 +67,36 @@ def get_system_prompt(profile: dict) -> str:
     return out
 
 
+# Stop words for image search keyword fallback (heuristic when LLM extraction fails)
+_IMAGE_SEARCH_STOP_WORDS = frozenset(
+    {"show", "me", "a", "an", "the", "picture", "of", "i", "want", "to", "see", "image", "photo", "get", "can", "draw", "please", "give", "something", "is", "it", "for", "and", "or"}
+)
+
+
+async def extract_image_search_keywords(user_message: str) -> str:
+    """
+    Extract 2-5 English keywords for Pixabay image search from the child's message.
+    Uses a one-shot LLM call; falls back to heuristic (strip stop words, first 5 words) if LLM fails or returns empty.
+    """
+    if not user_message or not user_message.strip():
+        return ""
+    user_message = user_message.strip()[:500]
+    prompt = (
+        "The child asked for an image. Reply with only 2 to 5 comma-separated English keywords for an image search. Nothing else.\n"
+        f"Child's request: {user_message}"
+    )
+    out = await call_ollama(prompt, timeout=15, raise_on_error=False)
+    if out:
+        # Take first 100 chars, strip, remove extra commas/spaces
+        keywords = " ".join(out.strip().replace(",", " ").split())[:100].strip()
+        if keywords:
+            return keywords
+    # Fallback: heuristic
+    words = user_message.lower().replace(",", " ").replace(".", " ").split()
+    kept = [w for w in words if w.isalnum() and w not in _IMAGE_SEARCH_STOP_WORDS][:5]
+    return " ".join(kept)[:100].strip()
+
+
 async def call_ollama(prompt: str, timeout: int = 30, raise_on_error: bool = False) -> str:
     """Send a single prompt to Ollama; return stripped response text. If raise_on_error, raise HTTPException on failure."""
     if _ollama_client is None:

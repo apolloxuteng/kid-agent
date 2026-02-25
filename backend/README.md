@@ -49,6 +49,7 @@ Log output is printed in the **same terminal** where you run `uvicorn`. You’ll
   - `Joke API success: setup='...'... punchline='...'...` — external joke API returned a joke.
   - `Joke requested and injected into prompt (profile_id=...)` — user asked for a joke and a joke was injected.
   - `Joke requested but API returned none; ...` — user asked for a joke but the API failed or returned invalid data.
+  - **Pixabay image:** `Image requested; returning Pixabay image (profile_id=...)` — user asked for a picture and an image was fetched and returned. `Pixabay image success: query=...` — image bytes fetched. `PIXABAY_API_KEY not set` — image requests will not fetch real images.
 
 Log level defaults to **INFO**. To change it, set `LOG_LEVEL` before starting the server (e.g. `LOG_LEVEL=DEBUG` for more detail, or `LOG_LEVEL=WARNING` to reduce noise).
 
@@ -63,7 +64,7 @@ Log level defaults to **INFO**. To change it, set `LOG_LEVEL` before starting th
 |--------|---------|-------------|
 | GET    | /health | Health check; returns `{"status":"ok"}` |
 | GET    | /profile | Returns the stored child profile for `profile_id` (query: `?profile_id=...`). |
-| POST   | /chat   | Send a message; body: `{"message": "your text", "profile_id": "uuid-or-id"}`; returns `{"reply": "..."}`. All memory and profile updates apply only to that profile. |
+| POST   | /chat   | Send a message; body: `{"message": "your text", "profile_id": "uuid-or-id"}`; returns `{"reply": "..."}`. When the user asks for an image (and `PIXABAY_API_KEY` is set), the response may also include `image_base64` and `image_media_type`. All memory and profile updates apply only to that profile. |
 | POST   | /chat/stream | Same as /chat but streams the reply as Server-Sent Events (SSE). See [Streaming](#streaming-post-chatstream) below. |
 | POST   | /reset  | Clear conversation memory for one profile; query: `?profile_id=...`. |
 | POST   | /profile/reset | Clear the child profile (name and interests) for one profile; query: `?profile_id=...`. |
@@ -74,7 +75,7 @@ Log level defaults to **INFO**. To change it, set `LOG_LEVEL` before starting th
 
 - **Event format:** Each SSE event is a single line: `data: <JSON>`. The JSON object can be:
   - `{"token": "..."}` — one piece of the reply; the client should append this to the displayed message.
-  - `{"done": true, "reply": "..."}` — stream finished; `reply` is the full assistant message (use this for history/TTS if you prefer).
+  - `{"done": true, "reply": "..."}` — stream finished; `reply` is the full assistant message (use this for history/TTS if you prefer). When the user asked for an image and one was found, the object also includes `"image_base64": "..."` and `"image_media_type": "image/jpeg"` (or e.g. `image/webp`).
   - `{"error": "..."}` — something went wrong (e.g. Ollama down); no reply is stored.
 - **Backward compatibility:** The non-streaming **POST /chat** is unchanged; existing clients keep working.
 
@@ -111,7 +112,9 @@ No backend changes are required beyond calling `/chat/stream` instead of `/chat`
 
 ## Configuration
 
-- **Environment:** `KID_AGENT_DB_KEY` — optional Fernet key for encrypting stored data (see Per-profile data above). You can put it in a **`backend/.env`** file (loaded automatically; do not commit `.env`). See [Moving the server to another machine](#moving-the-server-to-another-machine-eg-via-github) if you deploy or clone the repo elsewhere.
+- **Environment:** You can put these in a **`backend/.env`** file (loaded automatically; do not commit `.env`). See [Moving the server to another machine](#moving-the-server-to-another-machine-eg-via-github) if you deploy or clone the repo elsewhere.
+  - **`KID_AGENT_DB_KEY`** — optional Fernet key for encrypting stored data (see Per-profile data above).
+  - **`PIXABAY_API_KEY`** — optional. When set, the server can return images when the user explicitly asks for a picture (e.g. "Show me a picture of a dog"). Get a free key at [Pixabay API](https://pixabay.com/api/docs/). If not set, image requests are answered by the LLM without fetching a real image.
 - In `server.py` you can change:
   - `OLLAMA_URL` — default `http://localhost:11434/api/generate`
   - `MODEL_NAME` — default `llama3`

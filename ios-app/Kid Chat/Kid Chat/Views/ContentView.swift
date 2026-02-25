@@ -613,26 +613,37 @@ struct MessageBubble: View {
     }
 
     private var bubbleContent: some View {
-        Text(message.text)
-            .font(.system(size: 20, weight: .medium, design: .rounded))
-            .foregroundStyle(message.isUser ? KidTheme.bubbleTextUser : KidTheme.bubbleTextAI)
-            .padding(.horizontal, 18)
-            .padding(.vertical, 14)
-            .background(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .fill(
-                        message.isUser
-                            ? LinearGradient(colors: [KidTheme.bubbleUserStart, KidTheme.bubbleUserEnd], startPoint: .topLeading, endPoint: .bottomTrailing)
-                            : LinearGradient(colors: [KidTheme.bubbleAIStart, KidTheme.bubbleAIEnd], startPoint: .topLeading, endPoint: .bottomTrailing)
-                    )
-            )
-            .overlay {
-                if !message.isUser, let gradient = accentGradient {
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .strokeBorder(gradient, lineWidth: 2.5)
-                }
+        VStack(alignment: message.isUser ? .trailing : .leading, spacing: 10) {
+            if let data = message.imageData, let uiImage = UIImage(data: data) {
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: 400, maxHeight: 300)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
-            .frame(maxWidth: 340, alignment: message.isUser ? .trailing : .leading)
+            if !message.text.isEmpty {
+                Text(message.text)
+                    .font(.system(size: 20, weight: .medium, design: .rounded))
+                    .foregroundStyle(message.isUser ? KidTheme.bubbleTextUser : KidTheme.bubbleTextAI)
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(
+                    message.isUser
+                        ? LinearGradient(colors: [KidTheme.bubbleUserStart, KidTheme.bubbleUserEnd], startPoint: .topLeading, endPoint: .bottomTrailing)
+                        : LinearGradient(colors: [KidTheme.bubbleAIStart, KidTheme.bubbleAIEnd], startPoint: .topLeading, endPoint: .bottomTrailing)
+                )
+        )
+        .overlay {
+            if !message.isUser, let gradient = accentGradient {
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .strokeBorder(gradient, lineWidth: 2.5)
+            }
+        }
+        .frame(maxWidth: 340, alignment: message.isUser ? .trailing : .leading)
     }
 }
 
