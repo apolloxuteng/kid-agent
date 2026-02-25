@@ -8,23 +8,14 @@ import os
 
 import httpx
 
+from config import OLLAMA_CHAT_TIMEOUT, OLLAMA_SUMMARY_TIMEOUT, RECENT_MESSAGES_COUNT
 from fastapi import HTTPException
-
-
-def _env_int(key: str, default: int) -> int:
-    try:
-        return int(os.environ.get(key, default))
-    except ValueError:
-        return default
 
 
 _ollama_client: httpx.AsyncClient | None = None
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
 MODEL_NAME = os.environ.get("MODEL_NAME", "qwen2.5")
-OLLAMA_CHAT_TIMEOUT = _env_int("OLLAMA_CHAT_TIMEOUT", 60)
-OLLAMA_SUMMARY_TIMEOUT = _env_int("OLLAMA_SUMMARY_TIMEOUT", 30)
-RECENT_MESSAGES_COUNT = _env_int("RECENT_MESSAGES_COUNT", 10)
 
 
 def set_ollama_client(client: httpx.AsyncClient | None) -> None:
@@ -56,6 +47,7 @@ Silly and mischief requests:
 - When the child asks for a silly joke, a "poopoo" or "peepee" joke, or other mischief, stay in the conversation and play along. Do not refuse, lecture, or redirect to a different topic just because the request is silly or mildly potty-themed.
 - Mild potty humor and mischief (e.g. light bathroom or silly body jokes) are acceptable and fun for kids. Reply with a short, silly, kid-appropriate joke or reaction. Keep it brief and playful, not crude or explicit.
 - Do not say anything truly violating: nothing explicit, harmful, or inappropriate for young children. The line is mischief and fun, not inappropriate.
+- If a joke is provided below, deliver it in a warm, kid-friendly way.
 
 """
 
@@ -190,14 +182,37 @@ def build_prompt(
     profile: dict,
     conversation_summary: str,
     conversation_history: list[dict],
+    joke: tuple[str, str] | None = None,
+    injected_fact: str | None = None,
+    story_seed: str | None = None,
 ) -> str:
-    """Assemble SYSTEM PROMPT + CHILD PROFILE + CONVERSATION SUMMARY + RECENT MESSAGES (last 6)."""
+    """Assemble SYSTEM PROMPT + CHILD PROFILE + CONVERSATION SUMMARY + [JOKE/FACT/STORY BLOCKS] + RECENT MESSAGES (last 6)."""
     parts = [get_system_prompt(profile)]
 
     if conversation_summary:
         parts.append("Conversation summary:\n")
         parts.append(conversation_summary.strip())
         parts.append("\n\n")
+
+    if joke is not None:
+        setup, punchline = joke
+        parts.append("Joke to deliver (use this):\n")
+        parts.append(f"Setup: {setup}\n")
+        parts.append(f"Punchline: {punchline}\n\n")
+        parts.append("Deliver this joke in a warm, kid-friendly way in one or two sentences.\n\n")
+
+    if injected_fact:
+        parts.append("Use this fact when answering:\n")
+        parts.append(f"{injected_fact}\n\n")
+        parts.append("Explain it simply in 2–3 sentences so the child can understand. Keep it warm and engaging.\n\n")
+
+    if story_seed:
+        parts.append("Use this idea for a short, funny story:\n")
+        parts.append(f"{story_seed}\n\n")
+        parts.append(
+            "Tell an engaging story based on this idea. For this reply only, you may write a longer story (e.g. 6–10 sentences or a short paragraph) "
+            "with a clear beginning, middle, and end. Keep it kid-friendly and fun. The usual 3–4 sentence limit does not apply here.\n\n"
+        )
 
     recent = conversation_history[-RECENT_MESSAGES_COUNT:] if conversation_history else []
     if recent:

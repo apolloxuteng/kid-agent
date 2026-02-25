@@ -40,6 +40,18 @@ Or run uvicorn via the venv’s Python (no activate needed):
 
 The API will be available at **http://localhost:8000**.
 
+### Viewing log messages
+
+Log output is printed in the **same terminal** where you run `uvicorn`. You’ll see:
+
+- **Request logs** — e.g. `INFO:     127.0.0.1:... "POST /chat HTTP/1.1" 200` (from Uvicorn).
+- **Application logs** — e.g. when the joke API is used:
+  - `Joke API success: setup='...'... punchline='...'...` — external joke API returned a joke.
+  - `Joke requested and injected into prompt (profile_id=...)` — user asked for a joke and a joke was injected.
+  - `Joke requested but API returned none; ...` — user asked for a joke but the API failed or returned invalid data.
+
+Log level defaults to **INFO**. To change it, set `LOG_LEVEL` before starting the server (e.g. `LOG_LEVEL=DEBUG` for more detail, or `LOG_LEVEL=WARNING` to reduce noise).
+
 ## Testing
 
 - **Interactive docs:** Open **http://localhost:8000/docs** in your browser. Use the **POST /chat** endpoint to send a message and see the JSON reply.

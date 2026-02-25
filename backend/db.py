@@ -12,6 +12,7 @@ import sqlite3
 
 from fastapi import HTTPException
 
+from config import MAX_CACHED_PROFILES, MAX_HISTORY_MESSAGES
 from crypto import decrypt_cell, encrypt_cell
 
 logger = logging.getLogger(__name__)
@@ -21,17 +22,6 @@ _BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(_BACKEND_DIR, "data")
 PROFILES_ROOT = os.path.join(DATA_DIR, "profiles")
 DB_PATH = os.path.join(DATA_DIR, "kid_agent.db")
-
-
-def _env_int(key: str, default: int) -> int:
-    try:
-        return int(os.environ.get(key, default))
-    except ValueError:
-        return default
-
-
-MAX_HISTORY_MESSAGES = _env_int("MAX_HISTORY_MESSAGES", 100)
-MAX_CACHED_PROFILES = _env_int("MAX_CACHED_PROFILES", 20)
 
 _profile_cache: dict[str, dict] = {}
 _summary_cache: dict[str, str] = {}

@@ -11,33 +11,79 @@ import json
 import logging
 import os
 import re
+import typing
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
 # Load .env before other app imports so KID_AGENT_DB_KEY is available
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
+# Configure logging so app messages (e.g. joke API success) are visible in the terminal
+_log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, _log_level, logging.INFO),
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import httpx
 
+from apis import facts as facts_api
+from apis import joke as joke_api
+from apis import stories as stories_api
+import config
 import db
 import llm
 
 logger = logging.getLogger(__name__)
 
-
-def _env_int(key: str, default: int) -> int:
-    try:
-        return int(os.environ.get(key, default))
-    except ValueError:
-        return default
+MAX_INTERESTS = config.MAX_INTERESTS
+MAX_EXTRACTED_LENGTH = config.MAX_EXTRACTED_LENGTH
 
 
-MAX_INTERESTS = _env_int("MAX_INTERESTS", 10)
-MAX_EXTRACTED_LENGTH = _env_int("MAX_EXTRACTED_LENGTH", 80)
+@dataclass
+class ChatContext:
+    """Result of computing joke/story/fact and whether to reply directly or use LLM."""
+    direct_reply: str | None
+    injected_fact: str | None
+    story_seed: str | None
+
+
+async def compute_chat_context(user_message: str, profile_id: str) -> ChatContext:
+    """Decide direct reply vs LLM and fetch joke/story/fact. Used by both /chat and /chat/stream."""
+    direct_reply: str | None = None
+    injected_fact: str | None = None
+    story_seed: str | None = None
+
+    if joke_api.user_asking_for_joke(user_message):
+        joke = await joke_api.fetch_joke()
+        if joke:
+            logger.info("Joke requested; returning API joke directly (profile_id=%s)", profile_id)
+            direct_reply = joke_api.format_joke_for_reply(joke[0], joke[1])
+        else:
+            logger.info("Joke requested but API returned none; letting LLM reply (profile_id=%s)", profile_id)
+    elif facts_api.user_asking_for_story(user_message):
+        story_data = await stories_api.fetch_random_story()
+        if story_data:
+            logger.info("Story requested; returning API story directly (profile_id=%s)", profile_id)
+            direct_reply = stories_api.format_story_for_reply(
+                story_data["title"], story_data["author"], story_data["story"], story_data["moral"]
+            )
+        else:
+            story_seed = await facts_api.fetch_random_fact()
+            if story_seed:
+                logger.info("Story requested but API returned none; using fact as story seed (profile_id=%s)", profile_id)
+    elif facts_api.user_asking_for_fact(user_message):
+        injected_fact = await facts_api.fetch_random_fact()
+        if injected_fact:
+            logger.info("Fact requested; injecting fact for LLM to explain (profile_id=%s)", profile_id)
+
+    return ChatContext(direct_reply=direct_reply, injected_fact=injected_fact, story_seed=story_seed)
 
 
 @asynccontextmanager
@@ -119,6 +165,47 @@ async def _run_summary_in_background(profile_id: str, history: list[dict], old_s
         logger.warning("Background save_summary failed for profile_id=%s", profile_id)
 
 
+async def _append_assistant_and_save(
+    profile_id: str,
+    conversation_history: list[dict],
+    conversation_summary: str,
+    background_tasks: BackgroundTasks,
+) -> bool:
+    """Trim history, optionally schedule summary, save. Caller must have already appended the assistant message. Returns True if save succeeded."""
+    trimmed = db.trim_history(conversation_history)
+    if len(trimmed) >= llm.RECENT_MESSAGES_COUNT and len(trimmed) % llm.RECENT_MESSAGES_COUNT == 0:
+        background_tasks.add_task(
+            _run_summary_in_background,
+            profile_id,
+            list(trimmed),
+            conversation_summary,
+        )
+    return await asyncio.to_thread(db.save_history, profile_id, trimmed)
+
+
+async def _stream_direct_reply(
+    reply: str,
+    profile_id: str,
+    conversation_history: list[dict],
+    conversation_summary: str,
+    background_tasks: BackgroundTasks,
+) -> StreamingResponse:
+    """Append reply to history, persist/summary via _append_assistant_and_save, return SSE stream (one token, one done)."""
+    conversation_history.append({"role": "assistant", "content": reply})
+    if not await _append_assistant_and_save(profile_id, conversation_history, conversation_summary, background_tasks):
+        db.invalidate_history_cache(profile_id)
+
+    async def _events() -> typing.AsyncIterator[str]:
+        yield f"data: {json.dumps({'token': reply})}\n\n"
+        yield f"data: {json.dumps({'done': True, 'reply': reply})}\n\n"
+
+    return StreamingResponse(
+        _events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.post("/chat")
 async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     """Non-streaming chat: load profile/history, update profile, call Ollama, save history and optional summary."""
@@ -129,9 +216,11 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     profile_id = request.profile_id
     await asyncio.to_thread(db.ensure_profile_dir, profile_id)
 
-    profile = await asyncio.to_thread(db.load_profile_json, profile_id)
-    conversation_summary = await asyncio.to_thread(db.load_summary, profile_id)
-    conversation_history = await asyncio.to_thread(db.load_history, profile_id)
+    profile, conversation_summary, conversation_history = await asyncio.gather(
+        asyncio.to_thread(db.load_profile_json, profile_id),
+        asyncio.to_thread(db.load_summary, profile_id),
+        asyncio.to_thread(db.load_history, profile_id),
+    )
 
     profile = update_profile_from_message(profile, user_message)
     if not await asyncio.to_thread(db.save_profile_json, profile_id, profile):
@@ -140,31 +229,28 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     conversation_history.append({"role": "user", "content": user_message})
     conversation_history = db.trim_history(conversation_history)
 
-    full_prompt = llm.build_prompt(profile, conversation_summary, conversation_history)
+    ctx = await compute_chat_context(user_message, profile_id)
 
-    try:
-        raw_reply = await llm.call_ollama(
-            full_prompt, timeout=llm.OLLAMA_CHAT_TIMEOUT, raise_on_error=True
+    if ctx.direct_reply is not None:
+        llm_reply = ctx.direct_reply
+    else:
+        full_prompt = llm.build_prompt(
+            profile, conversation_summary, conversation_history,
+            joke=None, injected_fact=ctx.injected_fact, story_seed=ctx.story_seed,
         )
-    except HTTPException:
-        if conversation_history and conversation_history[-1]["role"] == "user":
-            conversation_history.pop()
-        await asyncio.to_thread(db.save_history, profile_id, conversation_history)
-        raise
-
-    llm_reply = llm.strip_role_labels(raw_reply)
+        try:
+            raw_reply = await llm.call_ollama(
+                full_prompt, timeout=llm.OLLAMA_CHAT_TIMEOUT, raise_on_error=True
+            )
+        except HTTPException:
+            if conversation_history and conversation_history[-1]["role"] == "user":
+                conversation_history.pop()
+            await asyncio.to_thread(db.save_history, profile_id, conversation_history)
+            raise
+        llm_reply = llm.strip_role_labels(raw_reply)
 
     conversation_history.append({"role": "assistant", "content": llm_reply})
-    conversation_history = db.trim_history(conversation_history)
-
-    if len(conversation_history) >= llm.RECENT_MESSAGES_COUNT and len(conversation_history) % llm.RECENT_MESSAGES_COUNT == 0:
-        background_tasks.add_task(
-            _run_summary_in_background,
-            profile_id,
-            list(conversation_history),
-            conversation_summary,
-        )
-    if not await asyncio.to_thread(db.save_history, profile_id, conversation_history):
+    if not await _append_assistant_and_save(profile_id, conversation_history, conversation_summary, background_tasks):
         raise HTTPException(status_code=503, detail="Failed to save conversation.")
 
     return {"reply": llm_reply}
@@ -189,16 +275,7 @@ async def _stream_chat_sse(
 
         llm_reply = llm.strip_role_labels("".join(full_reply_parts))
         conversation_history.append({"role": "assistant", "content": llm_reply})
-        trimmed = db.trim_history(conversation_history)
-
-        if len(trimmed) >= llm.RECENT_MESSAGES_COUNT and len(trimmed) % llm.RECENT_MESSAGES_COUNT == 0:
-            background_tasks.add_task(
-                _run_summary_in_background,
-                profile_id,
-                list(trimmed),
-                conversation_summary,
-            )
-        if not await asyncio.to_thread(db.save_history, profile_id, trimmed):
+        if not await _append_assistant_and_save(profile_id, conversation_history, conversation_summary, background_tasks):
             db.invalidate_history_cache(profile_id)
             yield f"data: {json.dumps({'error': 'Failed to save conversation.'})}\n\n"
             return
@@ -221,9 +298,11 @@ async def chat_stream(request: ChatRequest, background_tasks: BackgroundTasks):
     profile_id = request.profile_id
     await asyncio.to_thread(db.ensure_profile_dir, profile_id)
 
-    profile = await asyncio.to_thread(db.load_profile_json, profile_id)
-    conversation_summary = await asyncio.to_thread(db.load_summary, profile_id)
-    conversation_history = await asyncio.to_thread(db.load_history, profile_id)
+    profile, conversation_summary, conversation_history = await asyncio.gather(
+        asyncio.to_thread(db.load_profile_json, profile_id),
+        asyncio.to_thread(db.load_summary, profile_id),
+        asyncio.to_thread(db.load_history, profile_id),
+    )
 
     profile = update_profile_from_message(profile, user_message)
     await asyncio.to_thread(db.save_profile_json, profile_id, profile)
@@ -231,8 +310,17 @@ async def chat_stream(request: ChatRequest, background_tasks: BackgroundTasks):
     conversation_history.append({"role": "user", "content": user_message})
     conversation_history = db.trim_history(conversation_history)
 
-    full_prompt = llm.build_prompt(profile, conversation_summary, conversation_history)
+    ctx = await compute_chat_context(user_message, profile_id)
 
+    if ctx.direct_reply is not None:
+        return await _stream_direct_reply(
+            ctx.direct_reply, profile_id, conversation_history, conversation_summary, background_tasks
+        )
+
+    full_prompt = llm.build_prompt(
+        profile, conversation_summary, conversation_history,
+        joke=None, injected_fact=ctx.injected_fact, story_seed=ctx.story_seed,
+    )
     return StreamingResponse(
         _stream_chat_sse(
             profile_id, full_prompt, conversation_summary, conversation_history, background_tasks

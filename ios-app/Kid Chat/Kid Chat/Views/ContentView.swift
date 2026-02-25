@@ -191,7 +191,7 @@ struct ContentView: View {
                         viewModel.inputText = "Tell me a funny story"
                         viewModel.sendMessage()
                     case .knowledge:
-                        viewModel.inputText = "Introduce me to something interesting from the world—a country, a famous person, or a cool place."
+                        viewModel.inputText = "Tell me a fact about the world"
                         viewModel.sendMessage()
                     case .question:
                         break // Kid asks questions; no auto-send
