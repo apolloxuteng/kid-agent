@@ -62,8 +62,8 @@ class ChatViewModel: ObservableObject {
     static var healthURL: URL? { URL(string: SERVER_BASE + "/health") }
     /// Keep only the last N messages to bound memory in long sessions.
     private static let maxMessages = 100
-    /// Request timeout so we don't stay in .thinking forever if the server hangs.
-    private static let requestTimeoutSeconds: UInt64 = 60
+    /// Request timeout so we don't stay in .thinking forever if the server hangs. Tool-calling (e.g. space/joke) can take 30–60+ seconds.
+    private static let requestTimeoutSeconds: UInt64 = 120
     /// Interval between connection retries when server was unreachable.
     private static let retryIntervalSeconds: UInt64 = 15
 
@@ -223,7 +223,7 @@ class ChatViewModel: ObservableObject {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 120
+        request.timeoutInterval = 150
         let profileIdString = activeProfileId?.uuidString ?? "default"
         request.httpBody = try? JSONEncoder().encode(ChatRequest(message: userMessageText, profile_id: profileIdString))
 
@@ -280,7 +280,12 @@ class ChatViewModel: ObservableObject {
                         let extraFromReply = reply.dropFirst(accumulated.count)
                         if !extraFromReply.isEmpty { speechManager.enqueueMore(String(extraFromReply)) }
                     }
-                    if !hasStartedSpeaking && !speechManager.isMuted { conversationState = .speaking }
+                    if !hasStartedSpeaking && !speechManager.isMuted {
+                        conversationState = .speaking
+                        // Fallback: if we enqueued nothing (no remainder, no extra), speak the full reply so voice still plays
+                        let hadNothingToEnqueue = remainderFromStream.isEmpty && reply.count <= accumulated.count
+                        if !reply.isEmpty && hadNothingToEnqueue { speechManager.speak(reply) }
+                    }
                     let imageData = event?.imageBase64.flatMap { Data(base64Encoded: $0) }
                     let imageMediaType = event?.imageMediaType
                     replacePlaceholderWithFinalReply(placeholderId: placeholderId, replyText: reply, imageData: imageData, imageMediaType: imageMediaType, speak: false)
@@ -314,7 +319,7 @@ class ChatViewModel: ObservableObject {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 120
+        request.timeoutInterval = 150
         let profileIdString = activeProfileId?.uuidString ?? "default"
         request.httpBody = try? JSONEncoder().encode(ChatRequest(message: userMessageText, profile_id: profileIdString))
 

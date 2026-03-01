@@ -155,6 +155,9 @@ class SpeechRecognizer: NSObject, ObservableObject {
         recognitionTask?.cancel()
         recognitionTask = nil
 
+        // Release the audio session so TTS (playback) can take over when the reply arrives.
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+
         DispatchQueue.main.async { [weak self] in
             self?.isRecording = false
         }

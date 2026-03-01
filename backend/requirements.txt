@@ -4,3 +4,5 @@ requests
 httpx
 cryptography
 python-dotenv
+mcp
+simpleeval

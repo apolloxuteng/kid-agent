@@ -3,19 +3,25 @@ Ollama LLM integration: system prompt, chat completion, and summary.
 Server sets the HTTP client at startup via set_ollama_client().
 """
 
+import asyncio
 import json
+import logging
 import os
 
 import httpx
 
-from config import OLLAMA_CHAT_TIMEOUT, OLLAMA_SUMMARY_TIMEOUT, RECENT_MESSAGES_COUNT
+from config import DEBUG_NO_HISTORY, OLLAMA_CHAT_TIMEOUT, OLLAMA_SUMMARY_TIMEOUT, RECENT_MESSAGES_COUNT
 from fastapi import HTTPException
+
+logger = logging.getLogger(__name__)
 
 
 _ollama_client: httpx.AsyncClient | None = None
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
+OLLAMA_CHAT_URL = os.environ.get("OLLAMA_CHAT_URL") or OLLAMA_URL.replace("/api/generate", "/api/chat")
 MODEL_NAME = os.environ.get("MODEL_NAME", "qwen2.5")
+MAX_TOOL_LOOP_ITERATIONS = 5
 
 
 def set_ollama_client(client: httpx.AsyncClient | None) -> None:
@@ -29,7 +35,19 @@ def get_ollama_client() -> httpx.AsyncClient | None:
     return _ollama_client
 
 
-SYSTEM_PROMPT_BASE = """You are a warm, friendly teacher talking to an 8-year-old child.
+SYSTEM_PROMPT_BASE = """CRITICAL — you must use tools for jokes, stories, facts, space pictures, images, quizzes, and weather:
+- If the child asks for a joke or something funny → call get_joke. Do not tell a joke from your own knowledge.
+- If they ask for a story or tale → call get_story. Do not make up a story yourself.
+- If they ask for a fact or something interesting → call get_fact. Do not invent a fact.
+- If they ask for a space/astronomy picture → call get_space_picture.
+- If they ask for a picture of something (e.g. dog, castle) → call search_image.
+- If they ask for a quiz or trivia question → call get_quiz.
+- If they ask about the weather or what it's like outside → call weather/get_weather_forecast with location (e.g. city/country) and date (today in YYYY-MM-DD). Do not make up weather.
+- If the child asks for a calculation or math (e.g. what is 5+3, how much is 10 times 2) → call calculate with the expression. Do not compute math yourself.
+Always call the tool first, then use the tool's result in your reply. Never answer those requests without calling the matching tool.
+When you receive a tool result (joke, story, fact, picture description, quiz, weather, calculator result), present ONLY that content in a warm way — do not add another joke, story, fact, or weather from your own knowledge.
+
+You are a warm, friendly teacher talking to an 8-year-old child.
 
 Your goal: Be simple and easy to understand, but accurate. Explain real ideas in plain language — never dumb down facts so much that they become wrong or vague. It's okay to use a real word (e.g. "gravity", "planet") and then explain it in one short phrase.
 
@@ -206,6 +224,177 @@ def strip_role_labels(text: str) -> str:
         else:
             break
     return out.strip()
+
+
+async def chat_with_tools(
+    messages: list[dict],
+    tools: list[dict],
+    timeout: int = 60,
+) -> tuple[str, list[dict]]:
+    """
+    Send a chat request to Ollama with tool definitions. Returns (message_content, tool_calls).
+    tool_calls is a list of { "name": str, "arguments": dict } (or empty if model replied without tools).
+    """
+    if _ollama_client is None:
+        raise HTTPException(status_code=500, detail="Ollama client not initialized.")
+    payload = {"model": MODEL_NAME, "messages": messages, "stream": False}
+    if tools:
+        payload["tools"] = tools
+    try:
+        r = await _ollama_client.post(OLLAMA_CHAT_URL, json=payload, timeout=timeout)
+        if r.status_code == 404:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"Ollama returned 404 — model '{MODEL_NAME}' not found or does not support tools. "
+                    f"Use a tool-capable model (e.g. qwen2.5, llama3.1)."
+                ),
+            )
+        r.raise_for_status()
+        data = r.json()
+        msg = data.get("message") or {}
+        content = (msg.get("content") or "").strip()
+        raw_tool_calls = msg.get("tool_calls") or []
+        tool_calls = []
+        for tc in raw_tool_calls:
+            fn = tc.get("function") if isinstance(tc, dict) else None
+            if not fn:
+                continue
+            name = fn.get("name")
+            args_raw = fn.get("arguments")
+            if isinstance(args_raw, str):
+                try:
+                    args = json.loads(args_raw) if args_raw.strip() else {}
+                except json.JSONDecodeError:
+                    args = {}
+            else:
+                args = args_raw if isinstance(args_raw, dict) else {}
+            if name:
+                tool_calls.append({"name": name, "arguments": args})
+
+        # Debug: log LLM response (tool selection vs plain reply)
+        if tool_calls:
+            logger.info(
+                "LLM returned tool_calls: %s (content preview: %s)",
+                [tc["name"] for tc in tool_calls],
+                (content[:150] + "..." if len(content) > 150 else content) or "(empty)",
+            )
+        else:
+            logger.info(
+                "LLM returned no tool_calls; plain reply (first 200 chars): %s",
+                (content[:200] + "..." if len(content) > 200 else content) or "(empty)",
+            )
+        return (content, tool_calls)
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=500, detail=f"Ollama chat request failed: {e}")
+    except httpx.ConnectError:
+        raise HTTPException(status_code=500, detail="Could not reach Ollama. Is it running? Try: ollama serve")
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=500, detail="Ollama took too long to respond.")
+
+
+async def run_chat_with_tools_orchestrator(
+    profile: dict,
+    conversation_summary: str,
+    conversation_history: list[dict],
+    profile_id: str,
+    last_assistant_message: str | None,
+    timeout: int = OLLAMA_CHAT_TIMEOUT,
+) -> tuple[str, list[tuple[bytes, str]]]:
+    """
+    Run the tool-calling chat loop: build messages, get tool defs, call Ollama; on tool_calls
+    run tools in parallel, append tool results, repeat. Returns (final_reply_text, attachments)
+    where attachments is a list of (image_bytes, media_type).
+    """
+    from routing.context import RoutingContext
+    from routing.registry import get_ollama_tool_definitions, run_tool
+
+    # Short instruction so the model sees it in the same turn as the user message (in case system is ignored).
+    _TOOL_USE_REMINDER = (
+        "When the user asks for a joke, story, fact, space picture, image, quiz, weather, or a calculation, you MUST call the matching tool "
+        "(get_joke, get_story, get_fact, get_space_picture, search_image, get_quiz, weather/get_weather_forecast, calculate). Do not answer from your own knowledge.\n\n"
+    )
+
+    def _build_messages() -> list[dict]:
+        out = [{"role": "system", "content": get_system_prompt(profile)}]
+        if conversation_summary and not DEBUG_NO_HISTORY:
+            out.append({"role": "system", "content": f"Conversation summary: {conversation_summary.strip()}"})
+        if DEBUG_NO_HISTORY:
+            # Debug: no history — only the current user message so we can see if the model calls the tool.
+            for entry in reversed(conversation_history):
+                if entry.get("role") == "user":
+                    content = (entry.get("content") or "").strip()
+                    if content:
+                        out.append({"role": "user", "content": _TOOL_USE_REMINDER + content})
+                    break
+        else:
+            # Only send the last N messages to Ollama so context stays small and the model sees the current request.
+            recent = conversation_history[-RECENT_MESSAGES_COUNT:] if len(conversation_history) > RECENT_MESSAGES_COUNT else conversation_history
+            for i, entry in enumerate(recent):
+                role = entry.get("role", "user")
+                content = entry.get("content", "")
+                if role in ("user", "assistant") and content:
+                    is_last_user = role == "user" and i == len(recent) - 1
+                    if is_last_user:
+                        content = _TOOL_USE_REMINDER + content
+                    out.append({"role": role, "content": content})
+        return out
+
+    messages = _build_messages()
+    if DEBUG_NO_HISTORY:
+        logger.info("DEBUG_NO_HISTORY: sent no conversation history (system + current user message only)")
+    tools = await get_ollama_tool_definitions()
+    tool_names = [t.get("function", {}).get("name") for t in tools if t.get("function")]
+    logger.info("Tool-calling chat: sent %d tools to Ollama: %s", len(tools), tool_names)
+    ctx = RoutingContext(
+        user_message=conversation_history[-1]["content"] if conversation_history and conversation_history[-1].get("role") == "user" else "",
+        last_assistant_message=last_assistant_message,
+        profile_id=profile_id,
+        conversation_history=conversation_history,
+    )
+    attachments: list[tuple[bytes, str]] = []
+
+    for call_index in range(MAX_TOOL_LOOP_ITERATIONS):
+        if call_index == 0:
+            logger.info("LLM call #1 (tool selection): %d messages", len(messages))
+        else:
+            logger.info("LLM call #%d (after tool result): %d messages", call_index + 1, len(messages))
+        content, tool_calls = await chat_with_tools(messages, tools, timeout=timeout)
+        if not tool_calls:
+            reply = strip_role_labels(content)
+            return (reply, attachments)
+
+        logger.info("Executing tools: %s", [tc["name"] for tc in tool_calls])
+        # Append assistant message with tool_calls (Ollama format: use "index" and arguments as dict, not string)
+        assistant_msg = {"role": "assistant", "content": content or ""}
+        assistant_msg["tool_calls"] = [
+            {"type": "function", "function": {"index": i, "name": tc["name"], "arguments": tc.get("arguments") or {}}}
+            for i, tc in enumerate(tool_calls)
+        ]
+        messages.append(assistant_msg)
+
+        # Run all tools in parallel
+        results = await asyncio.gather(*[run_tool(tc["name"], ctx, tc.get("arguments") or {}) for tc in tool_calls])
+
+        # Append tool result messages (Ollama: role "tool", content text).
+        # Instruct the model to present ONLY this content so it doesn't add its own joke/story/fact.
+        _TOOL_RESULT_INSTR = (
+            "Present ONLY the content below to the child in a warm, kid-friendly way. "
+            "Do not add another joke, story, fact, or quiz from your own knowledge.\n\n"
+        )
+        for i, result in enumerate(results):
+            if i < len(tool_calls):
+                tool_name = tool_calls[i]["name"]
+            else:
+                tool_name = "unknown"
+            text = result.text if result else "Tool failed or not found."
+            messages.append({"role": "tool", "tool_name": tool_name, "content": _TOOL_RESULT_INSTR + text})
+            if result and result.image:
+                attachments.append(result.image)
+
+    # Max iterations reached; use last content as reply
+    reply = strip_role_labels(content if content else "I'm having a little trouble. Want to try again?")
+    return (reply, attachments)
 
 
 def build_prompt(

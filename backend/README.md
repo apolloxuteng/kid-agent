@@ -64,7 +64,7 @@ Log level defaults to **INFO**. To change it, set `LOG_LEVEL` before starting th
 |--------|---------|-------------|
 | GET    | /health | Health check; returns `{"status":"ok"}` |
 | GET    | /profile | Returns the stored child profile for `profile_id` (query: `?profile_id=...`). |
-| POST   | /chat   | Send a message; body: `{"message": "your text", "profile_id": "uuid-or-id"}`; returns `{"reply": "..."}`. When the user asks for an image (and `PIXABAY_API_KEY` is set), the response may also include `image_base64` and `image_media_type`. All memory and profile updates apply only to that profile. |
+| POST   | /chat   | Send a message; body: `{"message": "your text", "profile_id": "uuid-or-id"}`; returns `{"reply": "..."}`. The reply may include **attachments** (e.g. images from tools). The response can contain `attachments`: `[{ "caption", "image_base64", "media_type" }]`; for a single image, `image_base64` and `image_media_type` are also set for backward compatibility. All memory and profile updates apply only to that profile. |
 | POST   | /chat/stream | Same as /chat but streams the reply as Server-Sent Events (SSE). See [Streaming](#streaming-post-chatstream) below. |
 | POST   | /reset  | Clear conversation memory for one profile; query: `?profile_id=...`. |
 | POST   | /profile/reset | Clear the child profile (name and interests) for one profile; query: `?profile_id=...`. |
@@ -75,7 +75,7 @@ Log level defaults to **INFO**. To change it, set `LOG_LEVEL` before starting th
 
 - **Event format:** Each SSE event is a single line: `data: <JSON>`. The JSON object can be:
   - `{"token": "..."}` — one piece of the reply; the client should append this to the displayed message.
-  - `{"done": true, "reply": "..."}` — stream finished; `reply` is the full assistant message (use this for history/TTS if you prefer). When the user asked for an image and one was found, the object also includes `"image_base64": "..."` and `"image_media_type": "image/jpeg"` (or e.g. `image/webp`).
+  - `{"done": true, "reply": "..."}` — stream finished; `reply` is the full assistant message (use this for history/TTS if you prefer). When tools returned images, the object may include `"attachments": [{ "caption", "image_base64", "media_type" }]` and, for a single image, `"image_base64"` and `"image_media_type"` for backward compatibility.
   - `{"error": "..."}` — something went wrong (e.g. Ollama down); no reply is stored.
 - **Backward compatibility:** The non-streaming **POST /chat** is unchanged; existing clients keep working.
 
@@ -110,14 +110,37 @@ No backend changes are required beyond calling `/chat/stream` instead of `/chat`
 - **How it’s updated:** Simple pattern matching on the user’s message (no extra LLM call). For example: “my name is Emma” → name is set; “I like dinosaurs” → “dinosaurs” is added to interests. Interests are capped at 10.
 - **POST /profile/reset?profile_id=...** clears name and interests for that profile only.
 
+## Tool calling (LLM-only routing)
+
+The backend uses **Ollama’s tool-calling API** so the **model decides** which tools to use (joke, story, fact, space picture, image search, quiz). There is no phrase-based routing: the LLM sees tool definitions and returns `tool_calls`; the server runs those tools (in-process or via MCP), then sends results back for a final reply.
+
+- **Ollama model:** Use a model that supports tool calling (e.g. **qwen2.5**, **llama3.1**). Set `MODEL_NAME` in `.env` or `llm.py`. If the model does not support tools, you may get 404 or empty tool_calls.
+- **Image handling:** Tool result **text** is sent to the model for the reply; **image bytes** are not sent to the model — they are added only to the response **attachments** for the client. So the model gets a short text summary (e.g. caption) and the client receives the actual image(s).
+
+### Adding a local tool
+
+1. In **`routing/local_tools.py`**, implement a tool that satisfies the **in-process tool** protocol: `name`, `description`, `parameters_schema`, and `async def run(ctx, arguments) -> ToolResult`. Use `RoutingContext` (user_message, last_assistant_message, profile_id, conversation_history) and return a `ToolResult(text=..., image=(bytes, media_type) | None)`.
+2. Add the tool instance to **`ALL_IN_PROCESS_TOOLS`** in the same file. It will be registered at import time and appear in the list of tools sent to Ollama.
+3. No changes are needed in `server.py` or the if/elif routing — the model will see the new tool and can call it by name.
+
+### MCP servers (external tools)
+
+The backend acts as an **MCP client**: it spawns configured MCP servers (stdio), lists their tools, and calls them when the model requests. Tools from MCP are merged with in-process tools; tool names are **namespaced** by server id (e.g. `weather/get_weather_forecast`).
+
+- **Configuration:** Set **`MCP_SERVERS`** in `.env` to a JSON array, or use **`mcp_servers.json`** in the backend directory. Example: `{ "id": "weather", "command": "npx", "args": ["-y", "@philschmid/weather-mcp"] }`. Use `id` (or `name`) to namespace tools. Optional `env` is passed to the subprocess (e.g. for API keys).
+- **Dependency:** Install the MCP client with `pip install mcp`. If `mcp` is not installed, the server runs without MCP (in-process tools only).
+- **Default:** `mcp_servers.json` includes a **weather** server ([@philschmid/weather-mcp](https://github.com/philschmid/weather-mcp)) so the child can ask "What's the weather today?" — requires **Node.js** and **npx**; no API key.
+- **Other examples:** NASA: `{ "id": "nasa", "command": "npx", "args": ["-y", "@programcomputer/nasa-mcp-server"], "env": { "NASA_API_KEY": "..." } }`.
+
 ## Configuration
 
 - **Environment:** You can put these in a **`backend/.env`** file (loaded automatically; do not commit `.env`). See [Moving the server to another machine](#moving-the-server-to-another-machine-eg-via-github) if you deploy or clone the repo elsewhere.
   - **`KID_AGENT_DB_KEY`** — optional Fernet key for encrypting stored data (see Per-profile data above).
   - **`PIXABAY_API_KEY`** — optional. When set, the server can return images when the user explicitly asks for a picture (e.g. "Show me a picture of a dog"). Get a free key at [Pixabay API](https://pixabay.com/api/docs/). If not set, image requests are answered by the LLM without fetching a real image.
-- In `server.py` you can change:
-  - `OLLAMA_URL` — default `http://localhost:11434/api/generate`
-  - `MODEL_NAME` — default `llama3`
+  - **`MCP_SERVERS`** — optional. JSON array of MCP server configs (see [MCP servers](#mcp-servers-external-tools) above). Alternatively use `mcp_servers.json` in the backend directory.
+- In **`llm.py`** you can change:
+  - **`OLLAMA_URL`** — default `http://localhost:11434/api/generate` (chat uses `/api/chat` automatically).
+  - **`MODEL_NAME`** — default `qwen2.5`; must be a model that supports **tool calling** (e.g. qwen2.5, llama3.1).
 
 Make sure Ollama is running and the model is pulled before calling `/chat`.
 
@@ -164,11 +187,11 @@ The server needs `httpx` (and other deps) from the project venv. Use the venv wh
 
 If you use `--reload`, start uvicorn with the venv’s interpreter (e.g. `./venv/bin/uvicorn server:app --reload --host 0.0.0.0` or run `uvicorn` after `source venv/bin/activate`) so the reload subprocess sees the same packages.
 
-**"Ollama request failed: 404 Client Error: Not Found for url: .../api/generate"**
+**"Ollama request failed: 404 Client Error: Not Found for url: .../api/chat"** (or `/api/generate`)
 
-Ollama returns 404 when the **model** is missing or the name is wrong. Fix it:
+Ollama returns 404 when the **model** is missing, the name is wrong, or the model does not support tool calling. Fix it:
 
 1. List installed models: `ollama list`
-2. Pull the default model: `ollama pull llama3`  
-   Or use a model you already have (e.g. `qwen2.5`, `llama3.2:latest`) and set that name in `server.py` as `MODEL_NAME`.
-3. Restart the kid-agent server and try again.
+2. Use a **tool-capable** model (e.g. `qwen2.5`, `llama3.1`): `ollama pull qwen2.5`
+3. Set `MODEL_NAME` in `.env` or in `llm.py` to that model (default is `qwen2.5`).
+4. Restart the kid-agent server and try again.

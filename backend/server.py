@@ -14,7 +14,6 @@ import os
 import re
 import typing
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
@@ -34,12 +33,6 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import httpx
 
-from apis import facts as facts_api
-from apis import joke as joke_api
-from apis import nasa_apod as nasa_apod_api
-from apis import pixabay as pixabay_api
-from apis import stories as stories_api
-from apis import trivia as trivia_api
 import config
 import db
 import llm
@@ -50,86 +43,12 @@ MAX_INTERESTS = config.MAX_INTERESTS
 MAX_EXTRACTED_LENGTH = config.MAX_EXTRACTED_LENGTH
 
 
-@dataclass
-class ChatContext:
-    """Result of computing joke/story/fact/image and whether to reply directly or use LLM."""
-    direct_reply: str | None
-    injected_fact: str | None
-    story_seed: str | None
-    image_data: tuple[bytes, str] | None  # (image_bytes, media_type) when user asked for an image
-
-
 def _last_assistant_message(conversation_history: list[dict]) -> str | None:
     """Return the content of the most recent assistant message, or None."""
     for m in reversed(conversation_history):
         if m.get("role") == "assistant":
             return (m.get("content") or "").strip() or None
     return None
-
-
-async def compute_chat_context(
-    user_message: str, profile_id: str, last_assistant_message: str | None = None
-) -> ChatContext:
-    """Decide direct reply vs LLM and fetch joke/story/fact/image. Used by both /chat and /chat/stream.
-    last_assistant_message is used to treat follow-ups like 'one more picture' as Space when the last reply was space."""
-    direct_reply: str | None = None
-    injected_fact: str | None = None
-    story_seed: str | None = None
-    image_data: tuple[bytes, str] | None = None
-
-    if joke_api.user_asking_for_joke(user_message):
-        joke = await joke_api.fetch_joke()
-        if joke:
-            logger.info("Joke requested; returning API joke directly (profile_id=%s)", profile_id)
-            direct_reply = joke_api.format_joke_for_reply(joke[0], joke[1])
-        else:
-            logger.info("Joke requested but API returned none; letting LLM reply (profile_id=%s)", profile_id)
-    elif facts_api.user_asking_for_story(user_message):
-        story_data = await stories_api.fetch_random_story()
-        if story_data:
-            logger.info("Story requested; returning API story directly (profile_id=%s)", profile_id)
-            direct_reply = stories_api.format_story_for_reply(
-                story_data["title"], story_data["author"], story_data["story"], story_data["moral"]
-            )
-        else:
-            story_seed = await facts_api.fetch_random_fact()
-            if story_seed:
-                logger.info("Story requested but API returned none; using fact as story seed (profile_id=%s)", profile_id)
-    elif facts_api.user_asking_for_fact(user_message):
-        injected_fact = await facts_api.fetch_random_fact()
-        if injected_fact:
-            logger.info("Fact requested; injecting fact for LLM to explain (profile_id=%s)", profile_id)
-    elif nasa_apod_api.user_asking_for_space(user_message, last_assistant_message):
-        # Check Space (NASA APOD) before Pixabay so "astronomy picture of the day" uses NASA, not Pixabay
-        use_random_date = bool(
-            last_assistant_message
-            and nasa_apod_api.last_message_suggests_space(last_assistant_message)
-            and nasa_apod_api.user_asking_for_another_picture(user_message)
-        )
-        apod_result = await nasa_apod_api.fetch_apod(use_random_date=use_random_date)
-        if apod_result:
-            img_bytes, img_media_type, title, explanation = apod_result
-            logger.info("Space requested; returning NASA APOD (profile_id=%s)", profile_id)
-            first_sentence = explanation.split(".")[0].strip() + "." if explanation else ""
-            if use_random_date:
-                direct_reply = f"Here's another space picture! {title}. {first_sentence}" if first_sentence else f"Here's another space picture! {title}"
-            else:
-                direct_reply = f"Here's today's space picture! {title}. {first_sentence}" if first_sentence else f"Here's today's space picture! {title}"
-            image_data = (img_bytes, img_media_type)
-    elif pixabay_api.user_asking_for_image(user_message):
-        keywords = await llm.extract_image_search_keywords(user_message)
-        image_result = await pixabay_api.fetch_image(keywords)
-        if image_result:
-            logger.info("Image requested; returning Pixabay image (profile_id=%s)", profile_id)
-            direct_reply = "Here's a picture for you!"
-            image_data = image_result
-    elif trivia_api.user_asking_for_quiz(user_message):
-        quiz_data = await trivia_api.fetch_quiz_question()
-        if quiz_data:
-            logger.info("Quiz requested; returning Open Trivia DB question (profile_id=%s)", profile_id)
-            direct_reply = trivia_api.format_quiz_for_reply(quiz_data)
-
-    return ChatContext(direct_reply=direct_reply, injected_fact=injected_fact, story_seed=story_seed, image_data=image_data)
 
 
 @asynccontextmanager
@@ -229,25 +148,35 @@ async def _append_assistant_and_save(
     return await asyncio.to_thread(db.save_history, profile_id, trimmed)
 
 
-async def _stream_direct_reply(
+def _attachments_to_response(attachments: list[tuple[bytes, str]]) -> list[dict]:
+    """Convert (bytes, media_type) list to list of {caption, image_base64, media_type} for API response."""
+    return [
+        {"caption": "", "image_base64": base64.b64encode(b).decode(), "media_type": mt}
+        for b, mt in attachments
+    ]
+
+
+async def _stream_orchestrator_reply(
     reply: str,
+    attachments: list[tuple[bytes, str]],
     profile_id: str,
     conversation_history: list[dict],
     conversation_summary: str,
     background_tasks: BackgroundTasks,
-    image_data: tuple[bytes, str] | None = None,
 ) -> StreamingResponse:
-    """Append reply to history, persist/summary via _append_assistant_and_save, return SSE stream (one token, one done). Optionally include image_base64 and image_media_type in done event."""
+    """Append reply to history, save, return SSE with done event (reply + optional attachments)."""
     conversation_history.append({"role": "assistant", "content": reply})
     if not await _append_assistant_and_save(profile_id, conversation_history, conversation_summary, background_tasks):
         db.invalidate_history_cache(profile_id)
 
     def _done_payload() -> dict:
         payload: dict = {"done": True, "reply": reply}
-        if image_data is not None:
-            img_bytes, media_type = image_data
-            payload["image_base64"] = base64.b64encode(img_bytes).decode()
-            payload["image_media_type"] = media_type
+        if attachments:
+            payload["attachments"] = _attachments_to_response(attachments)
+            if len(attachments) == 1:
+                b, mt = attachments[0]
+                payload["image_base64"] = base64.b64encode(b).decode()
+                payload["image_media_type"] = mt
         return payload
 
     async def _events() -> typing.AsyncIterator[str]:
@@ -285,70 +214,33 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     conversation_history = db.trim_history(conversation_history)
 
     last_assistant = _last_assistant_message(conversation_history)
-    ctx = await compute_chat_context(user_message, profile_id, last_assistant_message=last_assistant)
-
-    if ctx.direct_reply is not None:
-        llm_reply = ctx.direct_reply
-    else:
-        full_prompt = llm.build_prompt(
-            profile, conversation_summary, conversation_history,
-            joke=None, injected_fact=ctx.injected_fact, story_seed=ctx.story_seed,
+    try:
+        llm_reply, attachments = await llm.run_chat_with_tools_orchestrator(
+            profile,
+            conversation_summary,
+            conversation_history,
+            profile_id,
+            last_assistant,
+            timeout=config.OLLAMA_CHAT_TIMEOUT,
         )
-        try:
-            raw_reply = await llm.call_ollama(
-                full_prompt, timeout=llm.OLLAMA_CHAT_TIMEOUT, raise_on_error=True
-            )
-        except HTTPException:
-            if conversation_history and conversation_history[-1]["role"] == "user":
-                conversation_history.pop()
-            await asyncio.to_thread(db.save_history, profile_id, conversation_history)
-            raise
-        llm_reply = llm.strip_role_labels(raw_reply)
+    except HTTPException:
+        if conversation_history and conversation_history[-1]["role"] == "user":
+            conversation_history.pop()
+        await asyncio.to_thread(db.save_history, profile_id, conversation_history)
+        raise
 
     conversation_history.append({"role": "assistant", "content": llm_reply})
     if not await _append_assistant_and_save(profile_id, conversation_history, conversation_summary, background_tasks):
         raise HTTPException(status_code=503, detail="Failed to save conversation.")
 
-    if ctx.image_data is not None:
-        img_bytes, media_type = ctx.image_data
-        return {
-            "reply": llm_reply,
-            "image_base64": base64.b64encode(img_bytes).decode(),
-            "image_media_type": media_type,
-        }
-    return {"reply": llm_reply}
-
-
-async def _stream_chat_sse(
-    profile_id: str,
-    full_prompt: str,
-    conversation_summary: str,
-    conversation_history: list[dict],
-    background_tasks: BackgroundTasks,
-):
-    """Stream Ollama tokens as SSE; on completion append reply to history and save."""
-    full_reply_parts: list[str] = []
-    try:
-        if llm.get_ollama_client() is None:
-            yield f"data: {json.dumps({'error': 'Ollama client not initialized'})}\n\n"
-            return
-        async for part in llm.stream_ollama(full_prompt, timeout=llm.OLLAMA_CHAT_TIMEOUT):
-            full_reply_parts.append(part)
-            yield f"data: {json.dumps({'token': part})}\n\n"
-
-        llm_reply = llm.strip_role_labels("".join(full_reply_parts))
-        conversation_history.append({"role": "assistant", "content": llm_reply})
-        if not await _append_assistant_and_save(profile_id, conversation_history, conversation_summary, background_tasks):
-            db.invalidate_history_cache(profile_id)
-            yield f"data: {json.dumps({'error': 'Failed to save conversation.'})}\n\n"
-            return
-        yield f"data: {json.dumps({'done': True, 'reply': llm_reply})}\n\n"
-    except Exception as e:
-        if conversation_history and conversation_history[-1]["role"] == "user":
-            conversation_history.pop()
-        if not await asyncio.to_thread(db.save_history, profile_id, conversation_history):
-            db.invalidate_history_cache(profile_id)
-        yield f"data: {json.dumps({'error': str(e)})}\n\n"
+    out: dict = {"reply": llm_reply}
+    if attachments:
+        out["attachments"] = _attachments_to_response(attachments)
+        if len(attachments) == 1:
+            b, mt = attachments[0]
+            out["image_base64"] = base64.b64encode(b).decode()
+            out["image_media_type"] = mt
+    return out
 
 
 @app.post("/chat/stream")
@@ -374,28 +266,28 @@ async def chat_stream(request: ChatRequest, background_tasks: BackgroundTasks):
     conversation_history = db.trim_history(conversation_history)
 
     last_assistant = _last_assistant_message(conversation_history)
-    ctx = await compute_chat_context(user_message, profile_id, last_assistant_message=last_assistant)
-
-    if ctx.direct_reply is not None:
-        return await _stream_direct_reply(
-            ctx.direct_reply,
-            profile_id,
-            conversation_history,
+    try:
+        llm_reply, attachments = await llm.run_chat_with_tools_orchestrator(
+            profile,
             conversation_summary,
-            background_tasks,
-            image_data=ctx.image_data,
+            conversation_history,
+            profile_id,
+            last_assistant,
+            timeout=config.OLLAMA_CHAT_TIMEOUT,
         )
+    except HTTPException:
+        if conversation_history and conversation_history[-1]["role"] == "user":
+            conversation_history.pop()
+        await asyncio.to_thread(db.save_history, profile_id, conversation_history)
+        raise
 
-    full_prompt = llm.build_prompt(
-        profile, conversation_summary, conversation_history,
-        joke=None, injected_fact=ctx.injected_fact, story_seed=ctx.story_seed,
-    )
-    return StreamingResponse(
-        _stream_chat_sse(
-            profile_id, full_prompt, conversation_summary, conversation_history, background_tasks
-        ),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    return await _stream_orchestrator_reply(
+        llm_reply,
+        attachments,
+        profile_id,
+        conversation_history,
+        conversation_summary,
+        background_tasks,
     )
 
 

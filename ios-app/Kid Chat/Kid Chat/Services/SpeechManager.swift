@@ -127,10 +127,12 @@ final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
     private func ensureAudioSession() {
         let session = AVAudioSession.sharedInstance()
         do {
-            // .defaultToSpeaker is only valid with .playAndRecord; for .playback the default is already speaker.
+            // .playback so TTS uses the speaker; .duckOthers so other audio is ducked.
             try session.setCategory(.playback, mode: .default, options: [.duckOthers])
             try session.setActive(true, options: .notifyOthersOnDeactivation)
-        } catch { }
+        } catch {
+            // If activation fails (e.g. another app holds the session), we still try to speak; the system may recover.
+        }
     }
 
     /// Must be called on the main queue only. Starts the next queued utterance or notifies that we're done.
