@@ -124,23 +124,24 @@ async def fetch_apod(use_random_date: bool = False) -> tuple[bytes, str, str, st
     or None on failure or when APOD is a video.
 
     If use_random_date is True, fetches a random past date (for "one more picture" variety).
-    Otherwise fetches today's picture. If the chosen date is a video, retries with another
-    random date up to a few times.
+    Otherwise fetches today's picture first. If today's APOD is a video, falls back to
+    trying random past dates so the user still gets a space image.
     """
     key = (os.environ.get("NASA_API_KEY") or "").strip() or "DEMO_KEY"
-    max_tries = 5 if use_random_date else 1
+    max_tries = 5
     tried_dates: list[str] = []
 
     for _ in range(max_tries):
         params: dict[str, str] = {"api_key": key}
-        if use_random_date:
-            # Avoid reusing the same date we already tried (e.g. video)
+        if use_random_date or tried_dates:
+            # Random date: for "one more" variety, or fallback when today was video
             while True:
                 d = _random_apod_date()
                 if d not in tried_dates:
                     tried_dates.append(d)
                     break
             params["date"] = d
+        # else: first try with no date = today
 
         try:
             async with httpx.AsyncClient(timeout=APOD_REQUEST_TIMEOUT) as client:
@@ -165,11 +166,11 @@ async def fetch_apod(use_random_date: bool = False) -> tuple[bytes, str, str, st
         media_type = data.get("media_type")
         if media_type != "image":
             logger.info("APOD is not an image (media_type=%s) for date=%s; skipping", media_type, params.get("date", "today"))
-            if not use_random_date:
-                return None
+            tried_dates.append(params.get("date", "today"))
             continue
 
-        url = data.get("hdurl") or data.get("url")
+        # Prefer standard-resolution url (faster download); hdurl is high-res and larger.
+        url = data.get("url") or data.get("hdurl")
         if not url or not isinstance(url, str):
             return None
         title = (data.get("title") or "Today's space picture").strip()

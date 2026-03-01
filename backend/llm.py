@@ -35,17 +35,16 @@ def get_ollama_client() -> httpx.AsyncClient | None:
     return _ollama_client
 
 
-SYSTEM_PROMPT_BASE = """CRITICAL — you must use tools for jokes, stories, facts, space pictures, images, quizzes, and weather:
+SYSTEM_PROMPT_BASE = """CRITICAL — you must use tools for jokes, stories, facts, space pictures, images, quizzes, and calculations:
 - If the child asks for a joke or something funny → call get_joke. Do not tell a joke from your own knowledge.
 - If they ask for a story or tale → call get_story. Do not make up a story yourself.
 - If they ask for a fact or something interesting → call get_fact. Do not invent a fact.
 - If they ask for a space/astronomy picture → call get_space_picture.
 - If they ask for a picture of something (e.g. dog, castle) → call search_image.
 - If they ask for a quiz or trivia question → call get_quiz.
-- If they ask about the weather or what it's like outside → call weather/get_weather_forecast with location (e.g. city/country) and date (today in YYYY-MM-DD). Do not make up weather.
 - If the child asks for a calculation or math (e.g. what is 5+3, how much is 10 times 2) → call calculate with the expression. Do not compute math yourself.
 Always call the tool first, then use the tool's result in your reply. Never answer those requests without calling the matching tool.
-When you receive a tool result (joke, story, fact, picture description, quiz, weather, calculator result), present ONLY that content in a warm way — do not add another joke, story, fact, or weather from your own knowledge.
+When you receive a tool result (joke, story, fact, picture description, quiz, calculator result), present ONLY that content in a warm way — do not add another joke, story, fact, or answer from your own knowledge.
 
 You are a warm, friendly teacher talking to an 8-year-old child.
 
@@ -85,16 +84,28 @@ def get_system_prompt(profile: dict) -> str:
     return out
 
 
-# Stop words for image search keyword fallback (heuristic when LLM extraction fails)
+# Stop words for image search keyword fallback (heuristic to avoid LLM call when possible)
 _IMAGE_SEARCH_STOP_WORDS = frozenset(
     {"show", "me", "a", "an", "the", "picture", "of", "i", "want", "to", "see", "image", "photo", "get", "can", "draw", "please", "give", "something", "is", "it", "for", "and", "or"}
 )
 
 
+def image_search_keywords_heuristic(user_message: str) -> str:
+    """
+    Extract keywords from the user message using a simple heuristic (strip stop words, first 5 words).
+    Use this first to avoid an LLM call; call extract_image_search_keywords only when this returns empty.
+    """
+    if not user_message or not user_message.strip():
+        return ""
+    msg = user_message.strip()[:500].lower().replace(",", " ").replace(".", " ")
+    words = [w for w in msg.split() if w.isalnum() and w not in _IMAGE_SEARCH_STOP_WORDS][:5]
+    return " ".join(words)[:100].strip()
+
+
 async def extract_image_search_keywords(user_message: str) -> str:
     """
     Extract 2-5 English keywords for Pixabay image search from the child's message.
-    Uses a one-shot LLM call; falls back to heuristic (strip stop words, first 5 words) if LLM fails or returns empty.
+    Uses a one-shot LLM call; falls back to heuristic if LLM fails or returns empty.
     """
     if not user_message or not user_message.strip():
         return ""
@@ -109,10 +120,7 @@ async def extract_image_search_keywords(user_message: str) -> str:
         keywords = " ".join(out.strip().replace(",", " ").split())[:100].strip()
         if keywords:
             return keywords
-    # Fallback: heuristic
-    words = user_message.lower().replace(",", " ").replace(".", " ").split()
-    kept = [w for w in words if w.isalnum() and w not in _IMAGE_SEARCH_STOP_WORDS][:5]
-    return " ".join(kept)[:100].strip()
+    return image_search_keywords_heuristic(user_message)
 
 
 async def call_ollama(prompt: str, timeout: int = 30, raise_on_error: bool = False) -> str:
@@ -293,6 +301,82 @@ async def chat_with_tools(
         raise HTTPException(status_code=500, detail="Ollama took too long to respond.")
 
 
+async def chat_with_tools_stream(messages: list[dict], tools: list[dict], timeout: int = 60):
+    """
+    Like chat_with_tools but with stream=True. Yields content deltas (str) as they arrive;
+    at the end yields ("_done_", full_content, tool_calls) so the caller can forward tokens
+    and then handle the final (content, tool_calls).
+    """
+    if _ollama_client is None:
+        raise HTTPException(status_code=500, detail="Ollama client not initialized.")
+    payload = {"model": MODEL_NAME, "messages": messages, "stream": True}
+    if tools:
+        payload["tools"] = tools
+    try:
+        async with _ollama_client.stream("POST", OLLAMA_CHAT_URL, json=payload, timeout=timeout) as response:
+            if response.status_code == 404:
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        f"Ollama returned 404 — model '{MODEL_NAME}' not found or does not support tools."
+                    ),
+                )
+            response.raise_for_status()
+            full_content_parts: list[str] = []
+            tool_calls: list[dict] = []
+            async for line in response.aiter_lines():
+                if not line.strip():
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                msg = data.get("message") or {}
+                delta = msg.get("content") or ""
+                if delta:
+                    full_content_parts.append(delta)
+                    yield delta
+                # Ollama can send tool_calls in a chunk with done: false; accumulate from every chunk.
+                raw_tool_calls = msg.get("tool_calls") or []
+                if raw_tool_calls:
+                    parsed = []
+                    for tc in raw_tool_calls:
+                        fn = tc.get("function") if isinstance(tc, dict) else None
+                        if not fn:
+                            continue
+                        name = fn.get("name")
+                        args_raw = fn.get("arguments")
+                        if isinstance(args_raw, str):
+                            try:
+                                args = json.loads(args_raw) if args_raw.strip() else {}
+                            except json.JSONDecodeError:
+                                args = {}
+                        else:
+                            args = args_raw if isinstance(args_raw, dict) else {}
+                        if name:
+                            parsed.append({"name": name, "arguments": args})
+                    if parsed:
+                        tool_calls = parsed
+                if data.get("done"):
+                    break
+            full_content = "".join(full_content_parts).strip()
+            if tool_calls:
+                logger.info("LLM stream returned tool_calls: %s", [t["name"] for t in tool_calls])
+            else:
+                logger.info("LLM stream returned plain reply (first 200 chars): %s", (full_content[:200] + "..." if len(full_content) > 200 else full_content) or "(empty)")
+            yield ("_done_", full_content, tool_calls)
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=500, detail=f"Ollama chat request failed: {e}")
+    except httpx.ConnectError:
+        raise HTTPException(status_code=500, detail="Could not reach Ollama. Is it running? Try: ollama serve")
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=500, detail="Ollama took too long to respond.")
+
+
+# Tool names that fetch pictures; used to emit early "Finding a picture..." progress.
+_PICTURE_TOOLS = frozenset({"get_space_picture", "search_image"})
+
+
 async def run_chat_with_tools_orchestrator(
     profile: dict,
     conversation_summary: str,
@@ -300,19 +384,19 @@ async def run_chat_with_tools_orchestrator(
     profile_id: str,
     last_assistant_message: str | None,
     timeout: int = OLLAMA_CHAT_TIMEOUT,
-) -> tuple[str, list[tuple[bytes, str]]]:
+):
     """
-    Run the tool-calling chat loop: build messages, get tool defs, call Ollama; on tool_calls
-    run tools in parallel, append tool results, repeat. Returns (final_reply_text, attachments)
-    where attachments is a list of (image_bytes, media_type).
+    Run the tool-calling chat loop; yields ("progress", message) for early UI feedback
+    (e.g. when a picture tool is chosen) and ("result", (reply, attachments)) when done.
+    Attachments is a list of (image_bytes, media_type).
     """
     from routing.context import RoutingContext
     from routing.registry import get_ollama_tool_definitions, run_tool
 
     # Short instruction so the model sees it in the same turn as the user message (in case system is ignored).
     _TOOL_USE_REMINDER = (
-        "When the user asks for a joke, story, fact, space picture, image, quiz, weather, or a calculation, you MUST call the matching tool "
-        "(get_joke, get_story, get_fact, get_space_picture, search_image, get_quiz, weather/get_weather_forecast, calculate). Do not answer from your own knowledge.\n\n"
+        "When the user asks for a joke, story, fact, space picture, image, quiz, or a calculation, you MUST call the matching tool "
+        "(get_joke, get_story, get_fact, get_space_picture, search_image, get_quiz, calculate). Do not answer from your own knowledge.\n\n"
     )
 
     def _build_messages() -> list[dict]:
@@ -353,16 +437,28 @@ async def run_chat_with_tools_orchestrator(
         conversation_history=conversation_history,
     )
     attachments: list[tuple[bytes, str]] = []
+    content = ""
 
     for call_index in range(MAX_TOOL_LOOP_ITERATIONS):
         if call_index == 0:
             logger.info("LLM call #1 (tool selection): %d messages", len(messages))
         else:
             logger.info("LLM call #%d (after tool result): %d messages", call_index + 1, len(messages))
-        content, tool_calls = await chat_with_tools(messages, tools, timeout=timeout)
+        content = ""
+        tool_calls: list[dict] = []
+        async for event in chat_with_tools_stream(messages, tools, timeout=timeout):
+            if isinstance(event, tuple) and len(event) == 3 and event[0] == "_done_":
+                content, tool_calls = event[1], event[2]
+                break
+            yield ("token", event)
         if not tool_calls:
-            reply = strip_role_labels(content)
-            return (reply, attachments)
+            reply = strip_role_labels(content or "")
+            yield ("result", (reply, attachments))
+            return
+
+        # Emit progress so the client can show "Finding a picture..." immediately.
+        if any((tc.get("name") or "") in _PICTURE_TOOLS for tc in tool_calls):
+            yield ("progress", "Finding a picture...")
 
         logger.info("Executing tools: %s", [tc["name"] for tc in tool_calls])
         # Append assistant message with tool_calls (Ollama format: use "index" and arguments as dict, not string)
@@ -394,7 +490,7 @@ async def run_chat_with_tools_orchestrator(
 
     # Max iterations reached; use last content as reply
     reply = strip_role_labels(content if content else "I'm having a little trouble. Want to try again?")
-    return (reply, attachments)
+    yield ("result", (reply, attachments))
 
 
 def build_prompt(

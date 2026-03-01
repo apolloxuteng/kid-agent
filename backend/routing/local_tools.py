@@ -110,6 +110,8 @@ class SearchImageTool:
     async def run(self, ctx: RoutingContext, arguments: dict[str, Any]) -> ToolResult:
         keywords = (arguments.get("keywords") or "").strip() if isinstance(arguments, dict) else ""
         if not keywords:
+            keywords = llm.image_search_keywords_heuristic(ctx.user_message)
+        if not keywords:
             keywords = await llm.extract_image_search_keywords(ctx.user_message)
         result = await pixabay_api.fetch_image(keywords)
         if result:
@@ -131,6 +133,86 @@ class QuizTool:
         return ToolResult(text="I couldn't fetch a quiz question right now. Want to try again?")
 
 
+def _safe_eval_expression(expr: str):
+    """
+    Evaluate a simple math expression containing only 0-9, ., +, -, *, /, (, ), and spaces.
+    Uses simpleeval if available; otherwise a minimal safe evaluator (no eval() of arbitrary code).
+    """
+    try:
+        from simpleeval import SimpleEval
+        return SimpleEval().eval(expr)
+    except ImportError:
+        pass
+    # Fallback: only allow digits, decimal, and + - * / ( )
+    allowed = set("0123456789.+-*/() ")
+    if not all(c in allowed for c in expr):
+        raise ValueError("Invalid characters")
+    # Tokenize: numbers and operators
+    tokens = []
+    i = 0
+    while i < len(expr):
+        c = expr[i]
+        if c in " ":
+            i += 1
+            continue
+        if c in "+-*/()":
+            tokens.append(c)
+            i += 1
+            continue
+        if c.isdigit() or c == ".":
+            start = i
+            while i < len(expr) and (expr[i].isdigit() or expr[i] == "."):
+                i += 1
+            tokens.append(expr[start:i])
+            continue
+        raise ValueError("Invalid character")
+    if not tokens:
+        raise ValueError("Empty expression")
+
+    def parse_primary(idx):
+        if idx >= len(tokens):
+            raise ValueError("Unexpected end")
+        t = tokens[idx]
+        if t == "(":
+            val, idx = parse_add(idx + 1)
+            if idx >= len(tokens) or tokens[idx] != ")":
+                raise ValueError("Missing )")
+            return val, idx + 1
+        if t in "+-":
+            val, idx = parse_primary(idx + 1)
+            return -val if t == "-" else val, idx
+        try:
+            return float(t) if "." in t else int(t), idx + 1
+        except ValueError:
+            raise ValueError("Invalid number")
+
+    def parse_mul(idx):
+        val, idx = parse_primary(idx)
+        while idx < len(tokens) and tokens[idx] in "*/":
+            op = tokens[idx]
+            right, idx = parse_primary(idx + 1)
+            if op == "*":
+                val *= right
+            else:
+                if right == 0:
+                    raise ValueError("Division by zero")
+                val /= right
+        return val, idx
+
+    def parse_add(idx):
+        val, idx = parse_mul(idx)
+        while idx < len(tokens) and tokens[idx] in "+-":
+            op = tokens[idx]
+            right, idx = parse_mul(idx + 1)
+            val = val + right if op == "+" else val - right
+        return val, idx
+
+    val, idx = parse_add(0)
+    if idx != len(tokens):
+        raise ValueError("Extra tokens")
+    return val
+
+
 class CalculatorTool:
     name = "calculate"
     description = (
@@ -148,13 +230,11 @@ class CalculatorTool:
     }
 
     async def run(self, ctx: RoutingContext, arguments: dict[str, Any]) -> ToolResult:
-        from simpleeval import SimpleEval
-
         raw = (arguments.get("expression") or "").strip() if isinstance(arguments, dict) else ""
         if not raw or len(raw) > 200:
             return ToolResult(text="Give me a simple math problem like 2 + 3!")
         try:
-            result = SimpleEval().eval(raw)
+            result = _safe_eval_expression(raw)
         except Exception:
             return ToolResult(text="That one's tricky. Try something like 4 + 5!")
         if isinstance(result, float):

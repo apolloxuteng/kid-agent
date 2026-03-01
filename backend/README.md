@@ -125,12 +125,12 @@ The backend uses **Ollama’s tool-calling API** so the **model decides** which 
 
 ### MCP servers (external tools)
 
-The backend acts as an **MCP client**: it spawns configured MCP servers (stdio), lists their tools, and calls them when the model requests. Tools from MCP are merged with in-process tools; tool names are **namespaced** by server id (e.g. `weather/get_weather_forecast`).
+The backend acts as an **MCP client**: it spawns configured MCP servers (stdio), lists their tools, and calls them when the model requests. Tools from MCP are merged with in-process tools; tool names are **namespaced** by server id (e.g. `my-server/tool_name`).
 
-- **Configuration:** Set **`MCP_SERVERS`** in `.env` to a JSON array, or use **`mcp_servers.json`** in the backend directory. Example: `{ "id": "weather", "command": "npx", "args": ["-y", "@philschmid/weather-mcp"] }`. Use `id` (or `name`) to namespace tools. Optional `env` is passed to the subprocess (e.g. for API keys).
+- **Configuration:** Set **`MCP_SERVERS`** in `.env` to a JSON array, or use **`mcp_servers.json`** in the backend directory. Example: `{ "id": "my-server", "command": "npx", "args": ["-y", "some-mcp-package"] }`. Use `id` (or `name`) to namespace tools. Optional `env` is passed to the subprocess (e.g. for API keys).
 - **Dependency:** Install the MCP client with `pip install mcp`. If `mcp` is not installed, the server runs without MCP (in-process tools only).
-- **Default:** `mcp_servers.json` includes a **weather** server ([@philschmid/weather-mcp](https://github.com/philschmid/weather-mcp)) so the child can ask "What's the weather today?" — requires **Node.js** and **npx**; no API key.
-- **Other examples:** NASA: `{ "id": "nasa", "command": "npx", "args": ["-y", "@programcomputer/nasa-mcp-server"], "env": { "NASA_API_KEY": "..." } }`.
+- **Default:** `mcp_servers.json` is empty; add entries to enable MCP tools (requires **Node.js** and **npx** for stdio servers).
+- **Examples:** NASA: `{ "id": "nasa", "command": "npx", "args": ["-y", "@programcomputer/nasa-mcp-server"], "env": { "NASA_API_KEY": "..." } }`.
 
 ## Configuration
 

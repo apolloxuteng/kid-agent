@@ -190,6 +190,62 @@ async def _stream_orchestrator_reply(
     )
 
 
+async def _stream_orchestrator_events(
+    profile_id: str,
+    conversation_history: list[dict],
+    conversation_summary: str,
+    background_tasks: BackgroundTasks,
+    profile: dict,
+    last_assistant: str | None,
+    timeout: int,
+) -> typing.AsyncIterator[str]:
+    """
+    Drive the tool-calling orchestrator and yield SSE events: progress (when a picture
+    tool is chosen) then token + done with the final reply and attachments.
+    """
+    llm_reply = ""
+    attachments: list[tuple[bytes, str]] = []
+    try:
+        async for kind, payload in llm.run_chat_with_tools_orchestrator(
+            profile,
+            conversation_summary,
+            conversation_history,
+            profile_id,
+            last_assistant,
+            timeout=timeout,
+        ):
+            if kind == "progress":
+                yield f"data: {json.dumps({'progress': payload})}\n\n"
+            elif kind == "token":
+                yield f"data: {json.dumps({'token': payload})}\n\n"
+            elif kind == "result":
+                llm_reply, attachments = payload
+                break
+    except HTTPException:
+        if conversation_history and conversation_history[-1].get("role") == "user":
+            conversation_history.pop()
+        await asyncio.to_thread(db.save_history, profile_id, conversation_history)
+        yield f"data: {json.dumps({'error': 'Request failed.'})}\n\n"
+        return
+
+    conversation_history.append({"role": "assistant", "content": llm_reply})
+    if not await _append_assistant_and_save(profile_id, conversation_history, conversation_summary, background_tasks):
+        db.invalidate_history_cache(profile_id)
+
+    def _done_payload() -> dict:
+        payload: dict = {"done": True, "reply": llm_reply}
+        if attachments:
+            payload["attachments"] = _attachments_to_response(attachments)
+            if len(attachments) == 1:
+                b, mt = attachments[0]
+                payload["image_base64"] = base64.b64encode(b).decode()
+                payload["image_media_type"] = mt
+        return payload
+
+    # Reply was already streamed token-by-token; sending it again would cause TTS to speak twice.
+    yield f"data: {json.dumps(_done_payload())}\n\n"
+
+
 @app.post("/chat")
 async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     """Non-streaming chat: load profile/history, update profile, call Ollama, save history and optional summary."""
@@ -214,15 +270,20 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     conversation_history = db.trim_history(conversation_history)
 
     last_assistant = _last_assistant_message(conversation_history)
+    llm_reply = ""
+    attachments: list[tuple[bytes, str]] = []
     try:
-        llm_reply, attachments = await llm.run_chat_with_tools_orchestrator(
+        async for kind, payload in llm.run_chat_with_tools_orchestrator(
             profile,
             conversation_summary,
             conversation_history,
             profile_id,
             last_assistant,
             timeout=config.OLLAMA_CHAT_TIMEOUT,
-        )
+        ):
+            if kind == "result":
+                llm_reply, attachments = payload
+                break
     except HTTPException:
         if conversation_history and conversation_history[-1]["role"] == "user":
             conversation_history.pop()
@@ -266,28 +327,18 @@ async def chat_stream(request: ChatRequest, background_tasks: BackgroundTasks):
     conversation_history = db.trim_history(conversation_history)
 
     last_assistant = _last_assistant_message(conversation_history)
-    try:
-        llm_reply, attachments = await llm.run_chat_with_tools_orchestrator(
-            profile,
-            conversation_summary,
-            conversation_history,
+    return StreamingResponse(
+        _stream_orchestrator_events(
             profile_id,
+            conversation_history,
+            conversation_summary,
+            background_tasks,
+            profile,
             last_assistant,
-            timeout=config.OLLAMA_CHAT_TIMEOUT,
-        )
-    except HTTPException:
-        if conversation_history and conversation_history[-1]["role"] == "user":
-            conversation_history.pop()
-        await asyncio.to_thread(db.save_history, profile_id, conversation_history)
-        raise
-
-    return await _stream_orchestrator_reply(
-        llm_reply,
-        attachments,
-        profile_id,
-        conversation_history,
-        conversation_summary,
-        background_tasks,
+            config.OLLAMA_CHAT_TIMEOUT,
+        ),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 

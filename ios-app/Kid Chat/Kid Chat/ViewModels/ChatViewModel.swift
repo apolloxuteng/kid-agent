@@ -28,10 +28,11 @@ private struct ChatResponse: Decodable {
     }
 }
 
-/// SSE event from POST /chat/stream: either a token, done with reply, or error.
+/// SSE event from POST /chat/stream: token, progress (e.g. "Finding a picture..."), done with reply, or error.
 /// When done includes an image (e.g. Pixabay), imageBase64 and imageMediaType are set.
 private struct StreamEvent: Decodable {
     var token: String?
+    var progress: String?
     var done: Bool?
     var reply: String?
     var error: String?
@@ -39,7 +40,7 @@ private struct StreamEvent: Decodable {
     var imageMediaType: String?
 
     enum CodingKeys: String, CodingKey {
-        case token, done, reply, error
+        case token, progress, done, reply, error
         case imageBase64 = "image_base64"
         case imageMediaType = "image_media_type"
     }
@@ -272,6 +273,8 @@ class ChatViewModel: ObservableObject {
                             if !speechManager.isMuted { conversationState = .speaking }
                         }
                     }
+                } else if let progress = event?.progress, !progress.isEmpty {
+                    updateStreamingMessage(placeholderId: placeholderId, text: progress)
                 } else if event?.done == true, let reply = event?.reply {
                     // TTS remainder: what we haven't spoken from the stream, plus any tail the server sent only in done (e.g. Knowledge mode)
                     let remainderFromStream = accumulated.dropFirst(lastSpokenLength)

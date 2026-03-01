@@ -85,11 +85,11 @@ async def fetch_image(search_query: str) -> tuple[bytes, str] | None:
         logger.info("Pixabay returned no hits for query=%r", query)
         return None
 
-    # Prefer largeImageURL (high res), then webformatURL (~640px), then previewURL (thumbnail)
+    # Prefer smaller URLs for faster download (app displays at 400x300).
     first = hits[0]
     if not isinstance(first, dict):
         return None
-    image_url = first.get("largeImageURL") or first.get("webformatURL") or first.get("previewURL")
+    image_url = first.get("webformatURL") or first.get("previewURL") or first.get("largeImageURL")
     if not image_url or not isinstance(image_url, str):
         return None
 
