@@ -1,6 +1,7 @@
 """
-Ollama LLM integration: system prompt, chat completion, and summary.
-Server sets the HTTP client at startup via set_ollama_client().
+LLM integration: system prompt, chat completion, tool calling, and summary.
+Supports Ollama by default and LM Studio's OpenAI-compatible API when
+LLM_PROVIDER=lmstudio.
 """
 
 import asyncio
@@ -20,7 +21,13 @@ _ollama_client: httpx.AsyncClient | None = None
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
 OLLAMA_CHAT_URL = os.environ.get("OLLAMA_CHAT_URL") or OLLAMA_URL.replace("/api/generate", "/api/chat")
-MODEL_NAME = os.environ.get("MODEL_NAME", "qwen2.5")
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "ollama").strip().lower()
+LMSTUDIO_BASE_URL = os.environ.get("LMSTUDIO_BASE_URL", "http://localhost:1234/v1").rstrip("/")
+LMSTUDIO_CHAT_URL = os.environ.get("LMSTUDIO_CHAT_URL") or f"{LMSTUDIO_BASE_URL}/chat/completions"
+MODEL_NAME = os.environ.get(
+    "MODEL_NAME",
+    "lmstudio/google/gemma-4-26b-a4b" if LLM_PROVIDER == "lmstudio" else "qwen2.5",
+)
 MAX_TOOL_LOOP_ITERATIONS = 5
 
 
@@ -33,6 +40,69 @@ def set_ollama_client(client: httpx.AsyncClient | None) -> None:
 def get_ollama_client() -> httpx.AsyncClient | None:
     """Return the shared Ollama client (for streaming in server)."""
     return _ollama_client
+
+
+def _provider_name() -> str:
+    return "LM Studio" if LLM_PROVIDER == "lmstudio" else "Ollama"
+
+
+def _parse_tool_calls(raw_tool_calls: list[dict]) -> list[dict]:
+    """Normalize tool calls into {name, arguments, id} for Ollama/OpenAI-compatible APIs."""
+    tool_calls = []
+    for index, tc in enumerate(raw_tool_calls):
+        fn = tc.get("function") if isinstance(tc, dict) else None
+        if not fn:
+            continue
+        name = fn.get("name")
+        args_raw = fn.get("arguments")
+        if isinstance(args_raw, str):
+            try:
+                args = json.loads(args_raw) if args_raw.strip() else {}
+            except json.JSONDecodeError:
+                args = {}
+        else:
+            args = args_raw if isinstance(args_raw, dict) else {}
+        if name:
+            tool_calls.append({
+                "name": name,
+                "arguments": args,
+                "id": tc.get("id") or f"tool_call_{index}",
+            })
+    return tool_calls
+
+
+def _append_stream_tool_call_delta(acc: dict[int, dict], raw_tool_calls: list[dict]) -> None:
+    """Accumulate OpenAI-compatible streaming tool-call deltas by index."""
+    for position, tc in enumerate(raw_tool_calls):
+        if not isinstance(tc, dict):
+            continue
+        index = tc.get("index")
+        if index is None:
+            index = position
+        item = acc.setdefault(index, {"id": None, "name": "", "arguments": ""})
+        if tc.get("id"):
+            item["id"] = tc["id"]
+        fn = tc.get("function") or {}
+        if fn.get("name"):
+            item["name"] += fn["name"]
+        if fn.get("arguments"):
+            item["arguments"] += fn["arguments"]
+
+
+def _stream_tool_call_accumulator_to_list(acc: dict[int, dict]) -> list[dict]:
+    raw = []
+    for index in sorted(acc):
+        item = acc[index]
+        if not item.get("name"):
+            continue
+        raw.append({
+            "id": item.get("id") or f"tool_call_{index}",
+            "function": {
+                "name": item["name"],
+                "arguments": item.get("arguments") or "{}",
+            },
+        })
+    return _parse_tool_calls(raw)
 
 
 SYSTEM_PROMPT_BASE = """CRITICAL — you must use tools for jokes, stories, facts, space pictures, images, quizzes, and calculations:
@@ -124,30 +194,47 @@ async def extract_image_search_keywords(user_message: str) -> str:
 
 
 async def call_ollama(prompt: str, timeout: int = 30, raise_on_error: bool = False) -> str:
-    """Send a single prompt to Ollama; return stripped response text. If raise_on_error, raise HTTPException on failure."""
+    """Send a single prompt to the configured LLM; return stripped response text."""
     if _ollama_client is None:
         if raise_on_error:
-            raise HTTPException(status_code=500, detail="Ollama client not initialized.")
+            raise HTTPException(status_code=500, detail=f"{_provider_name()} client not initialized.")
         return ""
     try:
-        r = await _ollama_client.post(
-            OLLAMA_URL,
-            json={"model": MODEL_NAME, "prompt": prompt, "stream": False},
-            timeout=timeout,
-        )
+        if LLM_PROVIDER == "lmstudio":
+            r = await _ollama_client.post(
+                LMSTUDIO_CHAT_URL,
+                json={
+                    "model": MODEL_NAME,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False,
+                },
+                timeout=timeout,
+            )
+        else:
+            r = await _ollama_client.post(
+                OLLAMA_URL,
+                json={"model": MODEL_NAME, "prompt": prompt, "stream": False},
+                timeout=timeout,
+            )
         if r.status_code == 404:
             if raise_on_error:
                 raise HTTPException(
                     status_code=500,
                     detail=(
-                        f"Ollama returned 404 — model '{MODEL_NAME}' not found. "
-                        f"Run 'ollama list' to see installed models, then "
-                        f"'ollama pull {MODEL_NAME}' (or set MODEL_NAME to a model you have)."
+                        f"{_provider_name()} returned 404 — model or endpoint not found. "
+                        f"Check MODEL_NAME='{MODEL_NAME}' and the configured server URL."
                     ),
                 )
             return ""
         r.raise_for_status()
-        return r.json().get("response", "").strip()
+        data = r.json()
+        if LLM_PROVIDER == "lmstudio":
+            choices = data.get("choices") or []
+            if choices:
+                msg = choices[0].get("message") or {}
+                return (msg.get("content") or "").strip()
+            return ""
+        return data.get("response", "").strip()
     except httpx.HTTPStatusError:
         if raise_on_error:
             raise HTTPException(status_code=500, detail="Ollama request failed.")
@@ -156,7 +243,7 @@ async def call_ollama(prompt: str, timeout: int = 30, raise_on_error: bool = Fal
         if raise_on_error:
             raise HTTPException(
                 status_code=500,
-                detail="Could not reach Ollama. Is it running? Try: ollama serve",
+                detail=f"Could not reach {_provider_name()}. Is the server running?",
             )
         return ""
     except httpx.TimeoutException:
@@ -173,20 +260,41 @@ async def call_ollama(prompt: str, timeout: int = 30, raise_on_error: bool = Fal
 
 
 async def stream_ollama(prompt: str, timeout: int = 60):
-    """Stream Ollama tokens as an async generator. Yields token strings."""
+    """Stream tokens from the configured LLM as an async generator."""
     if _ollama_client is None:
         return
-    async with _ollama_client.stream(
-        "POST",
-        OLLAMA_URL,
-        json={"model": MODEL_NAME, "prompt": prompt, "stream": True},
-        timeout=timeout,
-    ) as response:
+    if LLM_PROVIDER == "lmstudio":
+        url = LMSTUDIO_CHAT_URL
+        payload = {
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": True,
+        }
+    else:
+        url = OLLAMA_URL
+        payload = {"model": MODEL_NAME, "prompt": prompt, "stream": True}
+    async with _ollama_client.stream("POST", url, json=payload, timeout=timeout) as response:
         if response.status_code == 404:
             return
         response.raise_for_status()
         async for line in response.aiter_lines():
             if not line.strip():
+                continue
+            if LLM_PROVIDER == "lmstudio":
+                if not line.startswith("data: "):
+                    continue
+                payload_text = line.removeprefix("data: ").strip()
+                if payload_text == "[DONE]":
+                    break
+                try:
+                    obj = json.loads(payload_text)
+                    choices = obj.get("choices") or []
+                    delta = (choices[0].get("delta") or {}) if choices else {}
+                    part = delta.get("content") or ""
+                    if part:
+                        yield part
+                except json.JSONDecodeError:
+                    continue
                 continue
             try:
                 obj = json.loads(line)
@@ -240,45 +348,33 @@ async def chat_with_tools(
     timeout: int = 60,
 ) -> tuple[str, list[dict]]:
     """
-    Send a chat request to Ollama with tool definitions. Returns (message_content, tool_calls).
+    Send a chat request with tool definitions. Returns (message_content, tool_calls).
     tool_calls is a list of { "name": str, "arguments": dict } (or empty if model replied without tools).
     """
     if _ollama_client is None:
-        raise HTTPException(status_code=500, detail="Ollama client not initialized.")
+        raise HTTPException(status_code=500, detail=f"{_provider_name()} client not initialized.")
     payload = {"model": MODEL_NAME, "messages": messages, "stream": False}
     if tools:
         payload["tools"] = tools
     try:
-        r = await _ollama_client.post(OLLAMA_CHAT_URL, json=payload, timeout=timeout)
+        url = LMSTUDIO_CHAT_URL if LLM_PROVIDER == "lmstudio" else OLLAMA_CHAT_URL
+        r = await _ollama_client.post(url, json=payload, timeout=timeout)
         if r.status_code == 404:
             raise HTTPException(
                 status_code=500,
                 detail=(
-                    f"Ollama returned 404 — model '{MODEL_NAME}' not found or does not support tools. "
-                    f"Use a tool-capable model (e.g. qwen2.5, llama3.1)."
+                    f"{_provider_name()} returned 404 — model '{MODEL_NAME}' not found or endpoint is unavailable."
                 ),
             )
         r.raise_for_status()
         data = r.json()
-        msg = data.get("message") or {}
+        if LLM_PROVIDER == "lmstudio":
+            choices = data.get("choices") or []
+            msg = (choices[0].get("message") or {}) if choices else {}
+        else:
+            msg = data.get("message") or {}
         content = (msg.get("content") or "").strip()
-        raw_tool_calls = msg.get("tool_calls") or []
-        tool_calls = []
-        for tc in raw_tool_calls:
-            fn = tc.get("function") if isinstance(tc, dict) else None
-            if not fn:
-                continue
-            name = fn.get("name")
-            args_raw = fn.get("arguments")
-            if isinstance(args_raw, str):
-                try:
-                    args = json.loads(args_raw) if args_raw.strip() else {}
-                except json.JSONDecodeError:
-                    args = {}
-            else:
-                args = args_raw if isinstance(args_raw, dict) else {}
-            if name:
-                tool_calls.append({"name": name, "arguments": args})
+        tool_calls = _parse_tool_calls(msg.get("tool_calls") or [])
 
         # Debug: log LLM response (tool selection vs plain reply)
         if tool_calls:
@@ -294,11 +390,11 @@ async def chat_with_tools(
             )
         return (content, tool_calls)
     except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=500, detail=f"Ollama chat request failed: {e}")
+        raise HTTPException(status_code=500, detail=f"{_provider_name()} chat request failed: {e}")
     except httpx.ConnectError:
-        raise HTTPException(status_code=500, detail="Could not reach Ollama. Is it running? Try: ollama serve")
+        raise HTTPException(status_code=500, detail=f"Could not reach {_provider_name()}. Is it running?")
     except httpx.TimeoutException:
-        raise HTTPException(status_code=500, detail="Ollama took too long to respond.")
+        raise HTTPException(status_code=500, detail=f"{_provider_name()} took too long to respond.")
 
 
 async def chat_with_tools_stream(messages: list[dict], tools: list[dict], timeout: int = 60):
@@ -308,24 +404,46 @@ async def chat_with_tools_stream(messages: list[dict], tools: list[dict], timeou
     and then handle the final (content, tool_calls).
     """
     if _ollama_client is None:
-        raise HTTPException(status_code=500, detail="Ollama client not initialized.")
+        raise HTTPException(status_code=500, detail=f"{_provider_name()} client not initialized.")
     payload = {"model": MODEL_NAME, "messages": messages, "stream": True}
     if tools:
         payload["tools"] = tools
     try:
-        async with _ollama_client.stream("POST", OLLAMA_CHAT_URL, json=payload, timeout=timeout) as response:
+        url = LMSTUDIO_CHAT_URL if LLM_PROVIDER == "lmstudio" else OLLAMA_CHAT_URL
+        async with _ollama_client.stream("POST", url, json=payload, timeout=timeout) as response:
             if response.status_code == 404:
                 raise HTTPException(
                     status_code=500,
                     detail=(
-                        f"Ollama returned 404 — model '{MODEL_NAME}' not found or does not support tools."
+                        f"{_provider_name()} returned 404 — model '{MODEL_NAME}' not found or endpoint is unavailable."
                     ),
                 )
             response.raise_for_status()
             full_content_parts: list[str] = []
             tool_calls: list[dict] = []
+            openai_tool_call_deltas: dict[int, dict] = {}
             async for line in response.aiter_lines():
                 if not line.strip():
+                    continue
+                if LLM_PROVIDER == "lmstudio":
+                    if not line.startswith("data: "):
+                        continue
+                    payload_text = line.removeprefix("data: ").strip()
+                    if payload_text == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(payload_text)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = data.get("choices") or []
+                    delta = (choices[0].get("delta") or {}) if choices else {}
+                    content_delta = delta.get("content") or ""
+                    if content_delta:
+                        full_content_parts.append(content_delta)
+                        yield content_delta
+                    raw_tool_calls = delta.get("tool_calls") or []
+                    if raw_tool_calls:
+                        _append_stream_tool_call_delta(openai_tool_call_deltas, raw_tool_calls)
                     continue
                 try:
                     data = json.loads(line)
@@ -339,38 +457,25 @@ async def chat_with_tools_stream(messages: list[dict], tools: list[dict], timeou
                 # Ollama can send tool_calls in a chunk with done: false; accumulate from every chunk.
                 raw_tool_calls = msg.get("tool_calls") or []
                 if raw_tool_calls:
-                    parsed = []
-                    for tc in raw_tool_calls:
-                        fn = tc.get("function") if isinstance(tc, dict) else None
-                        if not fn:
-                            continue
-                        name = fn.get("name")
-                        args_raw = fn.get("arguments")
-                        if isinstance(args_raw, str):
-                            try:
-                                args = json.loads(args_raw) if args_raw.strip() else {}
-                            except json.JSONDecodeError:
-                                args = {}
-                        else:
-                            args = args_raw if isinstance(args_raw, dict) else {}
-                        if name:
-                            parsed.append({"name": name, "arguments": args})
+                    parsed = _parse_tool_calls(raw_tool_calls)
                     if parsed:
                         tool_calls = parsed
                 if data.get("done"):
                     break
             full_content = "".join(full_content_parts).strip()
+            if LLM_PROVIDER == "lmstudio":
+                tool_calls = _stream_tool_call_accumulator_to_list(openai_tool_call_deltas)
             if tool_calls:
                 logger.info("LLM stream returned tool_calls: %s", [t["name"] for t in tool_calls])
             else:
                 logger.info("LLM stream returned plain reply (first 200 chars): %s", (full_content[:200] + "..." if len(full_content) > 200 else full_content) or "(empty)")
             yield ("_done_", full_content, tool_calls)
     except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=500, detail=f"Ollama chat request failed: {e}")
+        raise HTTPException(status_code=500, detail=f"{_provider_name()} chat request failed: {e}")
     except httpx.ConnectError:
-        raise HTTPException(status_code=500, detail="Could not reach Ollama. Is it running? Try: ollama serve")
+        raise HTTPException(status_code=500, detail=f"Could not reach {_provider_name()}. Is it running?")
     except httpx.TimeoutException:
-        raise HTTPException(status_code=500, detail="Ollama took too long to respond.")
+        raise HTTPException(status_code=500, detail=f"{_provider_name()} took too long to respond.")
 
 
 # Tool names that fetch pictures; used to emit early "Finding a picture..." progress.
@@ -412,7 +517,7 @@ async def run_chat_with_tools_orchestrator(
                         out.append({"role": "user", "content": _TOOL_USE_REMINDER + content})
                     break
         else:
-            # Only send the last N messages to Ollama so context stays small and the model sees the current request.
+            # Only send the last N messages so context stays small and the model sees the current request.
             recent = conversation_history[-RECENT_MESSAGES_COUNT:] if len(conversation_history) > RECENT_MESSAGES_COUNT else conversation_history
             for i, entry in enumerate(recent):
                 role = entry.get("role", "user")
@@ -429,7 +534,7 @@ async def run_chat_with_tools_orchestrator(
         logger.info("DEBUG_NO_HISTORY: sent no conversation history (system + current user message only)")
     tools = await get_ollama_tool_definitions()
     tool_names = [t.get("function", {}).get("name") for t in tools if t.get("function")]
-    logger.info("Tool-calling chat: sent %d tools to Ollama: %s", len(tools), tool_names)
+    logger.info("Tool-calling chat: sent %d tools to %s: %s", len(tools), _provider_name(), tool_names)
     ctx = RoutingContext(
         user_message=conversation_history[-1]["content"] if conversation_history and conversation_history[-1].get("role") == "user" else "",
         last_assistant_message=last_assistant_message,
@@ -461,18 +566,31 @@ async def run_chat_with_tools_orchestrator(
             yield ("progress", "Finding a picture...")
 
         logger.info("Executing tools: %s", [tc["name"] for tc in tool_calls])
-        # Append assistant message with tool_calls (Ollama format: use "index" and arguments as dict, not string)
+        # Append assistant message with tool_calls in the format expected by the active provider.
         assistant_msg = {"role": "assistant", "content": content or ""}
-        assistant_msg["tool_calls"] = [
-            {"type": "function", "function": {"index": i, "name": tc["name"], "arguments": tc.get("arguments") or {}}}
-            for i, tc in enumerate(tool_calls)
-        ]
+        if LLM_PROVIDER == "lmstudio":
+            assistant_msg["tool_calls"] = [
+                {
+                    "id": tc.get("id") or f"tool_call_{i}",
+                    "type": "function",
+                    "function": {
+                        "name": tc["name"],
+                        "arguments": json.dumps(tc.get("arguments") or {}),
+                    },
+                }
+                for i, tc in enumerate(tool_calls)
+            ]
+        else:
+            assistant_msg["tool_calls"] = [
+                {"type": "function", "function": {"index": i, "name": tc["name"], "arguments": tc.get("arguments") or {}}}
+                for i, tc in enumerate(tool_calls)
+            ]
         messages.append(assistant_msg)
 
         # Run all tools in parallel
         results = await asyncio.gather(*[run_tool(tc["name"], ctx, tc.get("arguments") or {}) for tc in tool_calls])
 
-        # Append tool result messages (Ollama: role "tool", content text).
+        # Append tool result messages.
         # Instruct the model to present ONLY this content so it doesn't add its own joke/story/fact.
         _TOOL_RESULT_INSTR = (
             "Present ONLY the content below to the child in a warm, kid-friendly way. "
@@ -484,7 +602,12 @@ async def run_chat_with_tools_orchestrator(
             else:
                 tool_name = "unknown"
             text = result.text if result else "Tool failed or not found."
-            messages.append({"role": "tool", "tool_name": tool_name, "content": _TOOL_RESULT_INSTR + text})
+            tool_msg = {"role": "tool", "content": _TOOL_RESULT_INSTR + text}
+            if LLM_PROVIDER == "lmstudio":
+                tool_msg["tool_call_id"] = tool_calls[i].get("id") or f"tool_call_{i}"
+            else:
+                tool_msg["tool_name"] = tool_name
+            messages.append(tool_msg)
             if result and result.image:
                 attachments.append(result.image)
 

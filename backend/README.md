@@ -1,11 +1,13 @@
 # Kid Agent Backend
 
-A minimal FastAPI backend that sends messages to a **local LLM (Ollama)** with a kid-friendly personality and **conversation memory**. Designed for a 5-year-old child and meant to run on a Mac Mini home server.
+A minimal FastAPI backend that sends messages to a **local LLM** with a kid-friendly personality and **conversation memory**. It supports **Ollama** by default and **LM Studio** via its OpenAI-compatible API. Designed for a child and meant to run on a Mac home server.
 
 ## Prerequisites
 
 - **Python 3.11+**
-- **Ollama** installed and running locally (e.g. `ollama serve` and `ollama pull llama3`)
+- One local LLM server:
+  - **Ollama** installed and running locally (e.g. `ollama serve` and `ollama pull qwen2.5`), or
+  - **LM Studio** running its local server with a tool-capable model loaded.
 
 ## Setup
 
@@ -39,6 +41,25 @@ Or run uvicorn via the venv’s Python (no activate needed):
 ```
 
 The API will be available at **http://localhost:8000**.
+
+### Using LM Studio instead of Ollama
+
+Start LM Studio's local server on the Mac that runs this backend, load your model, then run:
+
+```bash
+LLM_PROVIDER=lmstudio \
+MODEL_NAME=lmstudio/google/gemma-4-26b-a4b \
+LMSTUDIO_BASE_URL=http://localhost:1234/v1 \
+uvicorn server:app --reload --host 0.0.0.0
+```
+
+You can also put those values in `backend/.env`:
+
+```bash
+LLM_PROVIDER=lmstudio
+MODEL_NAME=lmstudio/google/gemma-4-26b-a4b
+LMSTUDIO_BASE_URL=http://localhost:1234/v1
+```
 
 ### Viewing log messages
 
@@ -112,9 +133,9 @@ No backend changes are required beyond calling `/chat/stream` instead of `/chat`
 
 ## Tool calling (LLM-only routing)
 
-The backend uses **Ollama’s tool-calling API** so the **model decides** which tools to use (joke, story, fact, space picture, image search, quiz). There is no phrase-based routing: the LLM sees tool definitions and returns `tool_calls`; the server runs those tools (in-process or via MCP), then sends results back for a final reply.
+The backend uses the configured model's **tool-calling API** so the **model decides** which tools to use (joke, story, fact, space picture, image search, quiz). There is no phrase-based routing: the LLM sees tool definitions and returns `tool_calls`; the server runs those tools (in-process or via MCP), then sends results back for a final reply.
 
-- **Ollama model:** Use a model that supports tool calling (e.g. **qwen2.5**, **llama3.1**). Set `MODEL_NAME` in `.env` or `llm.py`. If the model does not support tools, you may get 404 or empty tool_calls.
+- **Model:** Use a model/server combination that supports tool calling. For Ollama, examples include **qwen2.5** and **llama3.1**. For LM Studio, enable the local server and use its model id in `MODEL_NAME` (for example `lmstudio/google/gemma-4-26b-a4b`). If the model/server does not support tools, you may get 404, rejected requests, or empty `tool_calls`.
 - **Image handling:** Tool result **text** is sent to the model for the reply; **image bytes** are not sent to the model — they are added only to the response **attachments** for the client. So the model gets a short text summary (e.g. caption) and the client receives the actual image(s).
 
 ### Adding a local tool
@@ -140,9 +161,11 @@ The backend acts as an **MCP client**: it spawns configured MCP servers (stdio),
   - **`MCP_SERVERS`** — optional. JSON array of MCP server configs (see [MCP servers](#mcp-servers-external-tools) above). Alternatively use `mcp_servers.json` in the backend directory.
 - In **`llm.py`** you can change:
   - **`OLLAMA_URL`** — default `http://localhost:11434/api/generate` (chat uses `/api/chat` automatically).
-  - **`MODEL_NAME`** — default `qwen2.5`; must be a model that supports **tool calling** (e.g. qwen2.5, llama3.1).
+  - **`LLM_PROVIDER`** — `ollama` by default; set to `lmstudio` to use LM Studio.
+  - **`MODEL_NAME`** — default `qwen2.5` for Ollama, or `lmstudio/google/gemma-4-26b-a4b` when `LLM_PROVIDER=lmstudio`; must be a model that supports **tool calling**.
+  - **`LMSTUDIO_BASE_URL`** — default `http://localhost:1234/v1`; used only when `LLM_PROVIDER=lmstudio`.
 
-Make sure Ollama is running and the model is pulled before calling `/chat`.
+Make sure the selected LLM server is running and the model is loaded before calling `/chat`.
 
 ## Moving the server to another machine (e.g. via GitHub)
 
