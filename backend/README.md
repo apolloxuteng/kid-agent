@@ -48,7 +48,7 @@ Start LM Studio's local server on the Mac that runs this backend, load your mode
 
 ```bash
 LLM_PROVIDER=lmstudio \
-MODEL_NAME=lmstudio/google/gemma-4-26b-a4b \
+MODEL_NAME=google/gemma-4-26b-a4b \
 LMSTUDIO_BASE_URL=http://localhost:1234/v1 \
 uvicorn server:app --reload --host 0.0.0.0
 ```
@@ -57,7 +57,7 @@ You can also put those values in `backend/.env`:
 
 ```bash
 LLM_PROVIDER=lmstudio
-MODEL_NAME=lmstudio/google/gemma-4-26b-a4b
+MODEL_NAME=google/gemma-4-26b-a4b
 LMSTUDIO_BASE_URL=http://localhost:1234/v1
 ```
 
@@ -85,6 +85,7 @@ Log level defaults to **INFO**. To change it, set `LOG_LEVEL` before starting th
 |--------|---------|-------------|
 | GET    | /health | Health check; returns `{"status":"ok"}` |
 | GET    | /profile | Returns the stored child profile for `profile_id` (query: `?profile_id=...`). |
+| GET    | /words | Returns recently taught vocabulary words for `profile_id` (query: `?profile_id=...&limit=100`). |
 | POST   | /chat   | Send a message; body: `{"message": "your text", "profile_id": "uuid-or-id"}`; returns `{"reply": "..."}`. The reply may include **attachments** (e.g. images from tools). The response can contain `attachments`: `[{ "caption", "image_base64", "media_type" }]`; for a single image, `image_base64` and `image_media_type` are also set for backward compatibility. All memory and profile updates apply only to that profile. |
 | POST   | /chat/stream | Same as /chat but streams the reply as Server-Sent Events (SSE). See [Streaming](#streaming-post-chatstream) below. |
 | POST   | /reset  | Clear conversation memory for one profile; query: `?profile_id=...`. |
@@ -121,8 +122,8 @@ No backend changes are required beyond calling `/chat/stream` instead of `/chat`
 
 ## Conversation memory
 
-- For each profile, the server **loads** that profile’s history and summary from the database, builds the prompt (system + profile + summary + last 10 messages), calls the LLM, then **saves** updated history and summary back to the database.
-- History is **capped at 100 messages** per profile; a short summary is updated every 10 messages so context stays bounded without sending the full history every time.
+- For each profile, the server **loads** that profile’s history and summary from the database, builds the prompt (system + profile + summary + recent messages), calls the LLM, then **saves** updated history and summary back to the database.
+- History is **capped at 300 messages** per profile by default, and the prompt includes the most recent **40 messages** by default. A short summary is updated every **50 stored messages** by default so context stays useful without frequent background LLM calls. These defaults can be overridden with environment variables.
 - **POST /reset?profile_id=...** clears history and summary for that profile only.
 
 ## Child profile (per profile_id)
@@ -131,11 +132,11 @@ No backend changes are required beyond calling `/chat/stream` instead of `/chat`
 - **How it’s updated:** Simple pattern matching on the user’s message (no extra LLM call). For example: “my name is Emma” → name is set; “I like dinosaurs” → “dinosaurs” is added to interests. Interests are capped at 10.
 - **POST /profile/reset?profile_id=...** clears name and interests for that profile only.
 
-## Tool calling (LLM-only routing)
+## Tool calling and direct routing
 
-The backend uses the configured model's **tool-calling API** so the **model decides** which tools to use (joke, story, fact, space picture, image search, quiz). There is no phrase-based routing: the LLM sees tool definitions and returns `tool_calls`; the server runs those tools (in-process or via MCP), then sends results back for a final reply.
+The backend uses direct local routing for clear requests (joke, fact, quiz, word of the day, picture, calculation) and falls back to the configured model's **tool-calling API** for ambiguous tool requests. The LLM sees tool definitions and returns `tool_calls`; the server runs those tools (in-process or via MCP), then sends results back for a final reply.
 
-- **Model:** Use a model/server combination that supports tool calling. For Ollama, examples include **qwen2.5** and **llama3.1**. For LM Studio, enable the local server and use its model id in `MODEL_NAME` (for example `lmstudio/google/gemma-4-26b-a4b`). If the model/server does not support tools, you may get 404, rejected requests, or empty `tool_calls`.
+- **Model:** Use a model/server combination that supports tool calling. For Ollama, examples include **qwen2.5** and **llama3.1**. For LM Studio, enable the local server and use its model id in `MODEL_NAME` (for example `google/gemma-4-26b-a4b`). If the model/server does not support tools, you may get 404, rejected requests, or empty `tool_calls`.
 - **Image handling:** Tool result **text** is sent to the model for the reply; **image bytes** are not sent to the model — they are added only to the response **attachments** for the client. So the model gets a short text summary (e.g. caption) and the client receives the actual image(s).
 
 ### Adding a local tool
@@ -162,8 +163,12 @@ The backend acts as an **MCP client**: it spawns configured MCP servers (stdio),
 - In **`llm.py`** you can change:
   - **`OLLAMA_URL`** — default `http://localhost:11434/api/generate` (chat uses `/api/chat` automatically).
   - **`LLM_PROVIDER`** — `ollama` by default; set to `lmstudio` to use LM Studio.
-  - **`MODEL_NAME`** — default `qwen2.5` for Ollama, or `lmstudio/google/gemma-4-26b-a4b` when `LLM_PROVIDER=lmstudio`; must be a model that supports **tool calling**.
+  - **`MODEL_NAME`** — default `qwen2.5` for Ollama, or `google/gemma-4-26b-a4b` when `LLM_PROVIDER=lmstudio`; must be a model that supports **tool calling**. Set this in `.env` on the server so model changes do not require code edits.
   - **`LMSTUDIO_BASE_URL`** — default `http://localhost:1234/v1`; used only when `LLM_PROVIDER=lmstudio`.
+  - **`RECENT_MESSAGES_COUNT`** — default `40`; number of recent messages sent to the LLM.
+  - **`MAX_HISTORY_MESSAGES`** — default `300`; maximum stored history messages per profile.
+  - **`SUMMARY_EVERY_MESSAGES`** — default `50`; how often to refresh the profile summary.
+  - **`ENABLE_SUMMARY`** — default `true`; set to `false` to disable background summary calls.
 
 Make sure the selected LLM server is running and the model is loaded before calling `/chat`.
 

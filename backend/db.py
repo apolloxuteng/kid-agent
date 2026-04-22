@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import sqlite3
+from datetime import datetime, timezone
 
 from fastapi import HTTPException
 
@@ -68,6 +69,14 @@ def init_db() -> None:
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
                 PRIMARY KEY (profile_id, seq)
+            );
+            CREATE TABLE IF NOT EXISTS learned_words (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                profile_id TEXT NOT NULL,
+                word TEXT NOT NULL,
+                meaning TEXT NOT NULL,
+                example TEXT NOT NULL,
+                taught_at TEXT NOT NULL
             );
         """)
         conn.commit()
@@ -252,3 +261,59 @@ def trim_history(history: list[dict]) -> list[dict]:
     if len(history) <= MAX_HISTORY_MESSAGES:
         return history
     return history[-MAX_HISTORY_MESSAGES:]
+
+
+def save_learned_word(profile_id: str, word: str, meaning: str, example: str) -> bool:
+    """Append one taught vocabulary word for this profile. Returns True on success."""
+    ensure_profile_dir(profile_id)
+    taught_at = datetime.now(timezone.utc).isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            """
+            INSERT INTO learned_words (profile_id, word, meaning, example, taught_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                profile_id,
+                encrypt_cell(word.strip()) or "",
+                encrypt_cell(meaning.strip()) or "",
+                encrypt_cell(example.strip()) or "",
+                taught_at,
+            ),
+        )
+        conn.commit()
+        return True
+    except sqlite3.Error as e:
+        logger.exception("Failed to save learned word for profile_id=%s: %s", profile_id, e)
+        return False
+    finally:
+        conn.close()
+
+
+def load_learned_words(profile_id: str, limit: int = 100) -> list[dict]:
+    """Return recently taught words for a profile, newest first."""
+    validate_profile_id(profile_id)
+    limit = max(1, min(int(limit or 100), 500))
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        rows = conn.execute(
+            """
+            SELECT word, meaning, example, taught_at FROM learned_words
+            WHERE profile_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (profile_id, limit),
+        ).fetchall()
+        out = []
+        for word_raw, meaning_raw, example_raw, taught_at in rows:
+            out.append({
+                "word": decrypt_cell(word_raw) or "",
+                "meaning": decrypt_cell(meaning_raw) or "",
+                "example": decrypt_cell(example_raw) or "",
+                "taught_at": taught_at,
+            })
+        return out
+    finally:
+        conn.close()

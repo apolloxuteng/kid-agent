@@ -53,7 +53,7 @@ class ChatViewModel: ObservableObject {
     /// Server base URL. Read from Info.plist key "ServerBaseURL" if set; otherwise default. Run backend: uvicorn server:app --host 0.0.0.0
     static var SERVER_BASE: String {
         (Bundle.main.infoDictionary?["ServerBaseURL"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            ?? "http://192.168.68.71:8000"
+            ?? "http://192.168.68.67:8000"
     }
     /// Streaming endpoint: same body as /chat, returns SSE (token / done / error).
     static var streamURL: URL? { URL(string: SERVER_BASE + "/chat/stream") }
@@ -276,7 +276,7 @@ class ChatViewModel: ObservableObject {
                 } else if let progress = event?.progress, !progress.isEmpty {
                     updateStreamingMessage(placeholderId: placeholderId, text: progress)
                 } else if event?.done == true, let reply = event?.reply {
-                    // TTS remainder: what we haven't spoken from the stream, plus any tail the server sent only in done (e.g. Knowledge mode)
+                    // TTS remainder: what we haven't spoken from the stream, plus any tail the server sent only in done.
                     let remainderFromStream = accumulated.dropFirst(lastSpokenLength)
                     if !remainderFromStream.isEmpty { speechManager.enqueueMore(String(remainderFromStream)) }
                     if reply.count > accumulated.count {

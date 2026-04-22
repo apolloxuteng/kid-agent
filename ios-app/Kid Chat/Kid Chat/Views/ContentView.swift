@@ -16,7 +16,7 @@ struct ContentView: View {
     @EnvironmentObject private var profileManager: ProfileManager
     @EnvironmentObject private var conversationSettings: ConversationSettings
     @State private var appMode: AppMode = .selectProfile
-    /// When user picks a greeting mode, we may send a starter message once when chat appears (story/knowledge/joke); question mode has no auto-send.
+    /// When user picks a greeting mode, we may send a starter message once when chat appears.
     @State private var pendingStarter: GreetingStarter?
     @StateObject private var viewModel = ChatViewModel()
     @StateObject private var speechRecognizer = SpeechRecognizer()
@@ -84,7 +84,7 @@ struct ContentView: View {
                         }
                         .modifier(ThemedHeaderButtonModifier(accentGradient: conversationSettings.accentGradient))
                         .accessibilityLabel("Back to mode selection")
-                        .accessibilityHint("Returns to choose Story, Knowledge, Question, Joke, Space, or Quiz mode and starts a new conversation")
+                .accessibilityHint("Returns to choose Ask, Laugh, or Learn mode and starts a new conversation")
                         Spacer(minLength: 0)
                         Button(action: { showSettings = true }) {
                             Image(systemName: "gearshape")
@@ -187,22 +187,13 @@ struct ContentView: View {
                 viewModel.activeProfileId = profileManager.activeProfile?.id
                 if let starter = pendingStarter {
                     switch starter {
-                    case .story:
-                        viewModel.inputText = "Tell me a funny story"
-                        viewModel.sendMessage()
-                    case .knowledge:
-                        viewModel.inputText = "Tell me a fact about the world"
-                        viewModel.sendMessage()
-                    case .question:
+                    case .questions:
                         break // Kid asks questions; no auto-send
                     case .joke:
                         viewModel.inputText = "Tell me a funny joke"
                         viewModel.sendMessage()
-                    case .space:
-                        viewModel.inputText = "Show me the astronomy picture of the day"
-                        viewModel.sendMessage()
-                    case .quiz:
-                        viewModel.inputText = "Give me a quiz question"
+                    case .word:
+                        viewModel.inputText = "Teach me a word of the day"
                         viewModel.sendMessage()
                     }
                     pendingStarter = nil

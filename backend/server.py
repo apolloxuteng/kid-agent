@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import time
 import typing
 from contextlib import asynccontextmanager
 
@@ -138,7 +139,12 @@ async def _append_assistant_and_save(
 ) -> bool:
     """Trim history, optionally schedule summary, save. Caller must have already appended the assistant message. Returns True if save succeeded."""
     trimmed = db.trim_history(conversation_history)
-    if len(trimmed) >= llm.RECENT_MESSAGES_COUNT and len(trimmed) % llm.RECENT_MESSAGES_COUNT == 0:
+    if (
+        config.ENABLE_SUMMARY
+        and config.SUMMARY_EVERY_MESSAGES > 0
+        and len(trimmed) >= config.SUMMARY_EVERY_MESSAGES
+        and len(trimmed) % config.SUMMARY_EVERY_MESSAGES == 0
+    ):
         background_tasks.add_task(
             _run_summary_in_background,
             profile_id,
@@ -203,6 +209,8 @@ async def _stream_orchestrator_events(
     Drive the tool-calling orchestrator and yield SSE events: progress (when a picture
     tool is chosen) then token + done with the final reply and attachments.
     """
+    started = time.perf_counter()
+    first_token_at: float | None = None
     llm_reply = ""
     attachments: list[tuple[bytes, str]] = []
     try:
@@ -217,6 +225,13 @@ async def _stream_orchestrator_events(
             if kind == "progress":
                 yield f"data: {json.dumps({'progress': payload})}\n\n"
             elif kind == "token":
+                if first_token_at is None:
+                    first_token_at = time.perf_counter()
+                    logger.info(
+                        "chat_stream first token profile_id=%s elapsed=%.3fs",
+                        profile_id,
+                        first_token_at - started,
+                    )
                 yield f"data: {json.dumps({'token': payload})}\n\n"
             elif kind == "result":
                 llm_reply, attachments = payload
@@ -229,8 +244,17 @@ async def _stream_orchestrator_events(
         return
 
     conversation_history.append({"role": "assistant", "content": llm_reply})
+    save_started = time.perf_counter()
     if not await _append_assistant_and_save(profile_id, conversation_history, conversation_summary, background_tasks):
         db.invalidate_history_cache(profile_id)
+    logger.info(
+        "chat_stream completed profile_id=%s total=%.3fs save=%.3fs first_token=%.3fs attachments=%d",
+        profile_id,
+        time.perf_counter() - started,
+        time.perf_counter() - save_started,
+        (first_token_at - started) if first_token_at else -1,
+        len(attachments),
+    )
 
     def _done_payload() -> dict:
         payload: dict = {"done": True, "reply": llm_reply}
@@ -249,6 +273,7 @@ async def _stream_orchestrator_events(
 @app.post("/chat")
 async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     """Non-streaming chat: load profile/history, update profile, call Ollama, save history and optional summary."""
+    started = time.perf_counter()
     user_message = request.message.strip()
     if not user_message:
         return {"reply": "Say something and I'll answer!"}
@@ -256,11 +281,13 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     profile_id = request.profile_id
     await asyncio.to_thread(db.ensure_profile_dir, profile_id)
 
+    load_started = time.perf_counter()
     profile, conversation_summary, conversation_history = await asyncio.gather(
         asyncio.to_thread(db.load_profile_json, profile_id),
         asyncio.to_thread(db.load_summary, profile_id),
         asyncio.to_thread(db.load_history, profile_id),
     )
+    logger.info("chat loaded context profile_id=%s elapsed=%.3fs", profile_id, time.perf_counter() - load_started)
 
     profile = update_profile_from_message(profile, user_message)
     if not await asyncio.to_thread(db.save_profile_json, profile_id, profile):
@@ -273,6 +300,7 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     llm_reply = ""
     attachments: list[tuple[bytes, str]] = []
     try:
+        llm_started = time.perf_counter()
         async for kind, payload in llm.run_chat_with_tools_orchestrator(
             profile,
             conversation_summary,
@@ -284,6 +312,7 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
             if kind == "result":
                 llm_reply, attachments = payload
                 break
+        logger.info("chat llm completed profile_id=%s elapsed=%.3fs", profile_id, time.perf_counter() - llm_started)
     except HTTPException:
         if conversation_history and conversation_history[-1]["role"] == "user":
             conversation_history.pop()
@@ -291,8 +320,16 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
         raise
 
     conversation_history.append({"role": "assistant", "content": llm_reply})
+    save_started = time.perf_counter()
     if not await _append_assistant_and_save(profile_id, conversation_history, conversation_summary, background_tasks):
         raise HTTPException(status_code=503, detail="Failed to save conversation.")
+    logger.info(
+        "chat completed profile_id=%s total=%.3fs save=%.3fs attachments=%d",
+        profile_id,
+        time.perf_counter() - started,
+        time.perf_counter() - save_started,
+        len(attachments),
+    )
 
     out: dict = {"reply": llm_reply}
     if attachments:
@@ -307,6 +344,7 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest, background_tasks: BackgroundTasks):
     """Stream the assistant reply as Server-Sent Events (SSE)."""
+    started = time.perf_counter()
     user_message = request.message.strip()
     if not user_message:
         return {"reply": "Say something and I'll answer!"}
@@ -314,17 +352,20 @@ async def chat_stream(request: ChatRequest, background_tasks: BackgroundTasks):
     profile_id = request.profile_id
     await asyncio.to_thread(db.ensure_profile_dir, profile_id)
 
+    load_started = time.perf_counter()
     profile, conversation_summary, conversation_history = await asyncio.gather(
         asyncio.to_thread(db.load_profile_json, profile_id),
         asyncio.to_thread(db.load_summary, profile_id),
         asyncio.to_thread(db.load_history, profile_id),
     )
+    logger.info("chat_stream loaded context profile_id=%s elapsed=%.3fs", profile_id, time.perf_counter() - load_started)
 
     profile = update_profile_from_message(profile, user_message)
     await asyncio.to_thread(db.save_profile_json, profile_id, profile)
 
     conversation_history.append({"role": "user", "content": user_message})
     conversation_history = db.trim_history(conversation_history)
+    logger.info("chat_stream prepared profile_id=%s elapsed=%.3fs", profile_id, time.perf_counter() - started)
 
     last_assistant = _last_assistant_message(conversation_history)
     return StreamingResponse(
@@ -347,6 +388,13 @@ async def get_profile(profile_id: str):
     """Returns the stored child profile (name, interests) for the given profile_id."""
     db.validate_profile_id(profile_id)
     return await asyncio.to_thread(db.load_profile_json, profile_id)
+
+
+@app.get("/words")
+async def get_words(profile_id: str, limit: int = 100):
+    """Returns recently taught vocabulary words for the given profile_id."""
+    db.validate_profile_id(profile_id)
+    return {"words": await asyncio.to_thread(db.load_learned_words, profile_id, limit)}
 
 
 @app.post("/profile/reset")

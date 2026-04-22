@@ -8,6 +8,8 @@ import asyncio
 import json
 import logging
 import os
+import re
+import time
 
 import httpx
 
@@ -26,7 +28,7 @@ LMSTUDIO_BASE_URL = os.environ.get("LMSTUDIO_BASE_URL", "http://localhost:1234/v
 LMSTUDIO_CHAT_URL = os.environ.get("LMSTUDIO_CHAT_URL") or f"{LMSTUDIO_BASE_URL}/chat/completions"
 MODEL_NAME = os.environ.get(
     "MODEL_NAME",
-    "lmstudio/google/gemma-4-26b-a4b" if LLM_PROVIDER == "lmstudio" else "qwen2.5",
+    "google/gemma-4-26b-a4b" if LLM_PROVIDER == "lmstudio" else "qwen2.5",
 )
 MAX_TOOL_LOOP_ITERATIONS = 5
 
@@ -105,16 +107,17 @@ def _stream_tool_call_accumulator_to_list(acc: dict[int, dict]) -> list[dict]:
     return _parse_tool_calls(raw)
 
 
-SYSTEM_PROMPT_BASE = """CRITICAL — you must use tools for jokes, stories, facts, space pictures, images, quizzes, and calculations:
+SYSTEM_PROMPT_BASE = """CRITICAL — you must use tools for jokes, stories, facts, space pictures, images, quizzes, vocabulary words, and calculations:
 - If the child asks for a joke or something funny → call get_joke. Do not tell a joke from your own knowledge.
 - If they ask for a story or tale → call get_story. Do not make up a story yourself.
 - If they ask for a fact or something interesting → call get_fact. Do not invent a fact.
 - If they ask for a space/astronomy picture → call get_space_picture.
 - If they ask for a picture of something (e.g. dog, castle) → call search_image.
 - If they ask for a quiz or trivia question → call get_quiz.
+- If they ask for a word of the day or to learn a new word → call get_word_of_day.
 - If the child asks for a calculation or math (e.g. what is 5+3, how much is 10 times 2) → call calculate with the expression. Do not compute math yourself.
 Always call the tool first, then use the tool's result in your reply. Never answer those requests without calling the matching tool.
-When you receive a tool result (joke, story, fact, picture description, quiz, calculator result), present ONLY that content in a warm way — do not add another joke, story, fact, or answer from your own knowledge.
+When you receive a tool result (joke, story, fact, picture description, quiz, word, calculator result), present ONLY that content in a warm way — do not add another joke, story, fact, word, or answer from your own knowledge.
 
 You are a warm, friendly teacher talking to an 8-year-old child.
 
@@ -482,6 +485,63 @@ async def chat_with_tools_stream(messages: list[dict], tools: list[dict], timeou
 _PICTURE_TOOLS = frozenset({"get_space_picture", "search_image"})
 
 
+def _direct_tool_name_for_message(user_message: str, last_assistant_message: str | None) -> str | None:
+    """Return a local tool name for clear, low-risk requests that do not need LLM routing."""
+    from apis import facts as facts_api
+    from apis import joke as joke_api
+    from apis import nasa_apod as nasa_apod_api
+    from apis import pixabay as pixabay_api
+    from apis import trivia as trivia_api
+    from routing import local_tools
+
+    msg = (user_message or "").strip().lower()
+    if not msg:
+        return None
+    if joke_api.user_asking_for_joke(msg):
+        return "get_joke"
+    if trivia_api.user_asking_for_quiz(msg):
+        return "get_quiz"
+    if local_tools.user_asking_for_word_of_day(msg):
+        return "get_word_of_day"
+    if nasa_apod_api.user_asking_for_space(msg, last_assistant_message):
+        return "get_space_picture"
+    if pixabay_api.user_asking_for_image(msg):
+        return "search_image"
+    if facts_api.user_asking_for_fact(msg):
+        return "get_fact"
+    if _looks_like_calculation_request(msg):
+        return "calculate"
+    return None
+
+
+def _looks_like_calculation_request(message: str) -> bool:
+    if any(word in message for word in ("calculate", "what is", "what's", "how much", "plus", "minus", "times", "divided")):
+        return bool(re.search(r"\d", message))
+    return bool(re.fullmatch(r"\s*\d+(?:\s*[\+\-\*/]\s*\d+)+\s*", message))
+
+
+def _calculator_expression_from_message(message: str) -> str:
+    """Extract a simple arithmetic expression from child phrasing for the direct calculator path."""
+    out = message.lower()
+    replacements = {
+        "what is": "",
+        "what's": "",
+        "calculate": "",
+        "how much is": "",
+        "plus": "+",
+        "minus": "-",
+        "times": "*",
+        "multiplied by": "*",
+        "x": "*",
+        "divided by": "/",
+        "over": "/",
+    }
+    for old, new in replacements.items():
+        out = out.replace(old, new)
+    out = re.sub(r"[^0-9\.\+\-\*/\(\) ]", " ", out)
+    return " ".join(out.split())
+
+
 async def run_chat_with_tools_orchestrator(
     profile: dict,
     conversation_summary: str,
@@ -500,8 +560,8 @@ async def run_chat_with_tools_orchestrator(
 
     # Short instruction so the model sees it in the same turn as the user message (in case system is ignored).
     _TOOL_USE_REMINDER = (
-        "When the user asks for a joke, story, fact, space picture, image, quiz, or a calculation, you MUST call the matching tool "
-        "(get_joke, get_story, get_fact, get_space_picture, search_image, get_quiz, calculate). Do not answer from your own knowledge.\n\n"
+        "When the user asks for a joke, story, fact, space picture, image, quiz, word of the day, or a calculation, you MUST call the matching tool "
+        "(get_joke, get_story, get_fact, get_space_picture, search_image, get_quiz, get_word_of_day, calculate). Do not answer from your own knowledge.\n\n"
     )
 
     def _build_messages() -> list[dict]:
@@ -529,12 +589,6 @@ async def run_chat_with_tools_orchestrator(
                     out.append({"role": role, "content": content})
         return out
 
-    messages = _build_messages()
-    if DEBUG_NO_HISTORY:
-        logger.info("DEBUG_NO_HISTORY: sent no conversation history (system + current user message only)")
-    tools = await get_ollama_tool_definitions()
-    tool_names = [t.get("function", {}).get("name") for t in tools if t.get("function")]
-    logger.info("Tool-calling chat: sent %d tools to %s: %s", len(tools), _provider_name(), tool_names)
     ctx = RoutingContext(
         user_message=conversation_history[-1]["content"] if conversation_history and conversation_history[-1].get("role") == "user" else "",
         last_assistant_message=last_assistant_message,
@@ -543,6 +597,33 @@ async def run_chat_with_tools_orchestrator(
     )
     attachments: list[tuple[bytes, str]] = []
     content = ""
+
+    direct_tool_name = _direct_tool_name_for_message(ctx.user_message, last_assistant_message)
+    if direct_tool_name:
+        args = {}
+        if direct_tool_name == "calculate":
+            args["expression"] = _calculator_expression_from_message(ctx.user_message)
+        elif direct_tool_name == "search_image":
+            args["keywords"] = image_search_keywords_heuristic(ctx.user_message)
+        if direct_tool_name in _PICTURE_TOOLS:
+            yield ("progress", "Finding a picture...")
+        logger.info("Direct tool fast path: %s", direct_tool_name)
+        tool_started = time.perf_counter()
+        result = await run_tool(direct_tool_name, ctx, args)
+        logger.info("Direct tool completed: %s elapsed=%.3fs", direct_tool_name, time.perf_counter() - tool_started)
+        if result and result.image:
+            attachments.append(result.image)
+        reply = strip_role_labels(result.text if result else "I'm having a little trouble. Want to try again?")
+        yield ("token", reply)
+        yield ("result", (reply, attachments))
+        return
+
+    messages = _build_messages()
+    if DEBUG_NO_HISTORY:
+        logger.info("DEBUG_NO_HISTORY: sent no conversation history (system + current user message only)")
+    tools = await get_ollama_tool_definitions()
+    tool_names = [t.get("function", {}).get("name") for t in tools if t.get("function")]
+    logger.info("Tool-calling chat: sent %d tools to %s: %s", len(tools), _provider_name(), tool_names)
 
     for call_index in range(MAX_TOOL_LOOP_ITERATIONS):
         if call_index == 0:
@@ -594,7 +675,7 @@ async def run_chat_with_tools_orchestrator(
         # Instruct the model to present ONLY this content so it doesn't add its own joke/story/fact.
         _TOOL_RESULT_INSTR = (
             "Present ONLY the content below to the child in a warm, kid-friendly way. "
-            "Do not add another joke, story, fact, or quiz from your own knowledge.\n\n"
+            "Do not add another joke, story, fact, word, or quiz from your own knowledge.\n\n"
         )
         for i, result in enumerate(results):
             if i < len(tool_calls):

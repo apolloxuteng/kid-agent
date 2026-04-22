@@ -14,7 +14,7 @@ import SwiftUI
 enum AppMode {
     /// Initial screen: choose which profile to use (or add one).
     case selectProfile
-    /// Welcome screen with six mode buttons (Story, Knowledge, Question, Joke, Space, Quiz).
+    /// Welcome screen with three mode buttons.
     case greeting
     /// Chat screen.
     case chatting
@@ -22,23 +22,17 @@ enum AppMode {
 
 /// Which greeting mode the user chose; chat may auto-send a starter message for the server.
 enum GreetingStarter {
-    /// Server replies with a funny story.
-    case story
-    /// Server introduces a country, celebrity, or place in the world.
-    case knowledge
     /// Kid asks questions to get started; no auto-send.
-    case question
+    case questions
     /// Server starts the conversation with a funny joke.
     case joke
-    /// Server shows today's astronomy picture of the day (NASA APOD).
-    case space
-    /// Server asks a trivia/quiz question (Open Trivia DB).
-    case quiz
+    /// Server teaches and stores a vocabulary word.
+    case word
 }
 
 // MARK: - Greeting view
 
-/// Welcome screen: avatar, greeting, subtitle, and four mode buttons that call onStartChat(starter).
+/// Welcome screen: avatar, greeting, subtitle, and three mode buttons that call onStartChat(starter).
 struct GreetingView: View {
     @EnvironmentObject private var conversationSettings: ConversationSettings
     @EnvironmentObject private var profileManager: ProfileManager
@@ -104,18 +98,15 @@ struct GreetingView: View {
 
                 Spacer()
 
-                // Six mode buttons: 3×2 grid, visible pop-in and tap feedback
+                // Three mode buttons: aligned row, visible pop-in and tap feedback
                 LazyVGrid(columns: [
                     GridItem(.flexible(), spacing: 10),
                     GridItem(.flexible(), spacing: 10),
                     GridItem(.flexible(), spacing: 10),
                 ], spacing: 10) {
-                    greetingButton(emoji: "📖", title: "Story", subtitle: "Funny story", starter: .story, delay: 0)
-                    greetingButton(emoji: "🌍", title: "Knowledge", subtitle: "Fact of the world", starter: .knowledge, delay: 0.05)
-                    greetingButton(emoji: "❓", title: "Question", subtitle: "Ask anything", starter: .question, delay: 0.10)
-                    greetingButton(emoji: "😂", title: "Joke", subtitle: "Funny joke", starter: .joke, delay: 0.15)
-                    greetingButton(emoji: "🪐", title: "Space", subtitle: "Astronomy picture", starter: .space, delay: 0.20)
-                    greetingButton(emoji: "🧩", title: "Quiz", subtitle: "Trivia question", starter: .quiz, delay: 0.25)
+                    greetingButton(emoji: "❓", title: "Ask", subtitle: "Questions", starter: .questions, delay: 0)
+                    greetingButton(emoji: "😂", title: "Laugh", subtitle: "Jokes", starter: .joke, delay: 0.05)
+                    greetingButton(emoji: "🔤", title: "Learn", subtitle: "New word", starter: .word, delay: 0.10)
                 }
                 .padding(.horizontal, 20)
                 .padding(.bottom, 48)
@@ -143,7 +134,7 @@ struct GreetingView: View {
     @State private var subtitleOpacity: Double = 0
     @State private var subtitleOffset: CGFloat = 8
 
-    /// One rounded button with optional subtitle; visible pop-in and tap bounce. Layout fits 3×2 grid.
+    /// One rounded button with optional subtitle; visible pop-in and tap bounce.
     private func greetingButton(emoji: String, title: String, subtitle: String, starter: GreetingStarter, delay: Double) -> some View {
         Button(action: { onStartChat(starter) }) {
             VStack(spacing: 6) {

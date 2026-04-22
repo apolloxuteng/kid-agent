@@ -2,7 +2,9 @@
 In-process tools that wrap existing APIs. Each tool implements InProcessTool (name, description, parameters_schema, run).
 """
 
+import asyncio
 import logging
+import random
 from typing import Any
 
 from apis import facts as facts_api
@@ -12,12 +14,55 @@ from apis import pixabay as pixabay_api
 from apis import stories as stories_api
 from apis import trivia as trivia_api
 import llm
+import db
 
 from .context import RoutingContext
 from .protocol import InProcessTool, ollama_tool_definition
 from .result import ToolResult
 
 logger = logging.getLogger(__name__)
+
+
+WORD_OF_DAY_REQUEST_PHRASES = (
+    "word of the day",
+    "new word",
+    "teach me a word",
+    "learn a word",
+    "vocabulary word",
+    "today's word",
+    "todays word",
+)
+
+WORD_BANK: tuple[tuple[str, str, str], ...] = (
+    ("curious", "wanting to learn or know more about something", "Mia was curious about how butterflies fly."),
+    ("brave", "doing something even when it feels a little scary", "Leo was brave when he tried the tall slide."),
+    ("gentle", "soft and careful, not rough", "Use a gentle touch when you pet a small puppy."),
+    ("discover", "to find or learn something new", "We can discover tiny shells at the beach."),
+    ("patient", "able to wait calmly", "Nora was patient while the cookies baked."),
+    ("sparkle", "to shine with little flashes of light", "The snow can sparkle in the morning sun."),
+    ("cozy", "warm, comfortable, and safe-feeling", "A blanket can feel cozy on a rainy day."),
+    ("imagine", "to make a picture or idea in your mind", "You can imagine a castle in the clouds."),
+    ("tiny", "very small", "An ant is tiny compared with your shoe."),
+    ("enormous", "very, very big", "A whale is an enormous animal."),
+    ("whisper", "to speak very softly", "We whisper in the library so others can read."),
+    ("gather", "to bring things together", "Let's gather the blocks before dinner."),
+    ("clever", "good at thinking of smart ideas", "The clever fox found a way around the fence."),
+    ("protect", "to keep someone or something safe", "A helmet helps protect your head."),
+    ("delight", "a happy feeling", "Finding a surprise note can bring delight."),
+    ("wiggle", "to move with small quick motions", "The puppy's tail began to wiggle."),
+    ("peaceful", "calm and quiet", "The garden felt peaceful after the rain."),
+    ("create", "to make something new", "You can create a picture with crayons."),
+    ("observe", "to look carefully and notice things", "Scientists observe bugs with a magnifying glass."),
+    ("kindness", "being friendly and caring", "Sharing your toy is an act of kindness."),
+)
+
+
+def user_asking_for_word_of_day(message: str) -> bool:
+    """Return True if the message is asking to learn a vocabulary word."""
+    if not message or not message.strip():
+        return False
+    lower = message.strip().lower()
+    return any(phrase in lower for phrase in WORD_OF_DAY_REQUEST_PHRASES)
 
 
 class JokeTool:
@@ -245,6 +290,20 @@ class CalculatorTool:
         return ToolResult(text=str(result))
 
 
+class WordOfDayTool:
+    name = "get_word_of_day"
+    description = "Teach one kid-friendly English vocabulary word, with a simple meaning and example."
+    parameters_schema = None
+
+    async def run(self, ctx: RoutingContext, arguments: dict[str, Any]) -> ToolResult:
+        word, meaning, example = random.choice(WORD_BANK)
+        saved = await asyncio.to_thread(db.save_learned_word, ctx.profile_id, word, meaning, example)
+        if not saved:
+            logger.warning("Failed to store word of the day for profile_id=%s", ctx.profile_id)
+        text = f"Today's word is {word}. It means {meaning}. Example: {example}"
+        return ToolResult(text=text)
+
+
 # Singleton instances for the registry
 JOKE_TOOL = JokeTool()
 STORY_TOOL = StoryTool()
@@ -253,6 +312,7 @@ SPACE_TOOL = SpaceTool()
 SEARCH_IMAGE_TOOL = SearchImageTool()
 QUIZ_TOOL = QuizTool()
 CALCULATOR_TOOL = CalculatorTool()
+WORD_OF_DAY_TOOL = WordOfDayTool()
 
 ALL_IN_PROCESS_TOOLS: list[InProcessTool] = [
     JOKE_TOOL,
@@ -262,4 +322,5 @@ ALL_IN_PROCESS_TOOLS: list[InProcessTool] = [
     SEARCH_IMAGE_TOOL,
     QUIZ_TOOL,
     CALCULATOR_TOOL,
+    WORD_OF_DAY_TOOL,
 ]
