@@ -83,6 +83,29 @@ WORD_BANK: tuple[tuple[str, str, str], ...] = (
     ("essential", "very important and needed", "Water is essential for plants to grow."),
 )
 
+LOCAL_DEFINITION_BANK: tuple[tuple[str, str, str], ...] = WORD_BANK + (
+    ("sophisticated", "smart, advanced, or carefully made with many thoughtful details", "The robot used a sophisticated sensor to avoid bumping into the wall."),
+    ("independent", "able to do something or think for yourself without needing much help", "She became more independent after learning how to pack her own school bag."),
+    ("responsible", "trusted to make good choices and take care of what you need to do", "A responsible teammate remembers practice and helps clean up."),
+    ("generous", "willing to share time, help, or things with other people", "He was generous when he let his friend use the last marker."),
+    ("determined", "not giving up, even when something is difficult", "She was determined to finish the puzzle before dinner."),
+    ("patient", "able to wait or keep trying without getting upset", "A patient builder fixes one mistake at a time."),
+    ("convince", "to help someone believe or agree with an idea by giving reasons", "He tried to convince his parents that the plan was safe."),
+    ("explain", "to make an idea clear so someone can understand it", "The teacher used a drawing to explain how shadows work."),
+    ("describe", "to tell what something is like using details", "Can you describe the creature you imagined?"),
+    ("protect", "to keep someone or something safe from harm", "A helmet helps protect your head when you ride a bike."),
+    ("discover", "to find or learn something for the first time", "The class discovered tiny sprouts growing in the soil."),
+    ("imagine", "to make pictures or ideas in your mind", "You can imagine a city floating above the clouds."),
+    ("creative", "good at making new ideas, stories, designs, or solutions", "Her creative plan turned two boxes into a castle."),
+    ("challenge", "something difficult that gives you a chance to learn or improve", "The hard level in the game was a real challenge."),
+    ("focus", "to pay close attention to one thing", "He needed to focus so he could hear every note in the song."),
+    ("organize", "to arrange things in a clear and useful way", "We organize the cards by color before starting the game."),
+    ("conflict", "a disagreement or problem between people, ideas, or goals", "The story's conflict began when both teams wanted the same field."),
+    ("solution", "an answer or method that fixes a problem", "The solution was to tighten the loose screw."),
+    ("curious", "wanting to learn or know more about something", "A curious scientist asks questions and tests ideas."),
+    ("complex", "made of many connected parts", "A city is complex because roads, people, buildings, and rules all work together."),
+)
+
 
 def user_asking_for_word_of_day(message: str) -> bool:
     """Return True if the message is asking to learn a vocabulary word."""
@@ -131,6 +154,28 @@ def _parse_definition_json(text: str) -> dict | None:
     except (json.JSONDecodeError, TypeError, ValueError):
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _definition_from_bank(word: str) -> tuple[str, str, str] | None:
+    normalized = word.strip().lower()
+    for candidate, meaning, example in LOCAL_DEFINITION_BANK:
+        if candidate.lower() == normalized:
+            return candidate, meaning, example
+    return None
+
+
+async def _definition_from_learned_words(profile_id: str, word: str) -> tuple[str, str, str] | None:
+    learned = await asyncio.to_thread(db.load_learned_words, profile_id, 500)
+    normalized = word.strip().lower()
+    for item in learned:
+        learned_word = (item.get("word") or "").strip().lower()
+        if learned_word == normalized:
+            return (
+                item.get("word") or word,
+                item.get("meaning") or f"the meaning of the word {word}",
+                item.get("example") or f"I learned the word {word} today.",
+            )
+    return None
 
 
 class JokeTool:
@@ -313,6 +358,21 @@ class DefineWordTool:
         if not word or len(word) > 30:
             return ToolResult(text="Tell me one word, like: What does curious mean?")
 
+        learned_definition = await _definition_from_learned_words(ctx.profile_id, word)
+        if learned_definition:
+            word, meaning, example = learned_definition
+            logger.info("Definition served from learned words: word=%s", word)
+            return ToolResult(text=f"{word.capitalize()} means {meaning}. Example: {example}")
+
+        local_definition = _definition_from_bank(word)
+        if local_definition:
+            word, meaning, example = local_definition
+            saved = await asyncio.to_thread(db.save_learned_word, ctx.profile_id, word, meaning, example)
+            if not saved:
+                logger.warning("Failed to store local defined word for profile_id=%s word=%s", ctx.profile_id, word)
+            logger.info("Definition served from local bank: word=%s", word)
+            return ToolResult(text=f"{word.capitalize()} means {meaning}. Example: {example}")
+
         fallback_meaning = f"the meaning of the word {word}"
         fallback_example = f"I learned the word {word} today."
         prompt = (
@@ -321,7 +381,7 @@ class DefineWordTool:
             "The meaning should be one clear sentence. The example should be one natural sentence using the word. "
             f"Word: {word}"
         )
-        data = await llm.call_ollama(prompt, timeout=20, raise_on_error=False)
+        data = await llm.call_ollama(prompt, timeout=12, raise_on_error=False)
         meaning = fallback_meaning
         example = fallback_example
         if data:
