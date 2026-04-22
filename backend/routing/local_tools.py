@@ -51,26 +51,36 @@ DEFINE_WORD_PATTERNS = (
 )
 
 WORD_BANK: tuple[tuple[str, str, str], ...] = (
-    ("curious", "wanting to learn or know more about something", "Mia was curious about how butterflies fly."),
-    ("brave", "doing something even when it feels a little scary", "Leo was brave when he tried the tall slide."),
-    ("gentle", "soft and careful, not rough", "Use a gentle touch when you pet a small puppy."),
-    ("discover", "to find or learn something new", "We can discover tiny shells at the beach."),
-    ("patient", "able to wait calmly", "Nora was patient while the cookies baked."),
-    ("sparkle", "to shine with little flashes of light", "The snow can sparkle in the morning sun."),
-    ("cozy", "warm, comfortable, and safe-feeling", "A blanket can feel cozy on a rainy day."),
-    ("imagine", "to make a picture or idea in your mind", "You can imagine a castle in the clouds."),
-    ("tiny", "very small", "An ant is tiny compared with your shoe."),
-    ("enormous", "very, very big", "A whale is an enormous animal."),
-    ("whisper", "to speak very softly", "We whisper in the library so others can read."),
-    ("gather", "to bring things together", "Let's gather the blocks before dinner."),
-    ("clever", "good at thinking of smart ideas", "The clever fox found a way around the fence."),
-    ("protect", "to keep someone or something safe", "A helmet helps protect your head."),
-    ("delight", "a happy feeling", "Finding a surprise note can bring delight."),
-    ("wiggle", "to move with small quick motions", "The puppy's tail began to wiggle."),
-    ("peaceful", "calm and quiet", "The garden felt peaceful after the rain."),
-    ("create", "to make something new", "You can create a picture with crayons."),
-    ("observe", "to look carefully and notice things", "Scientists observe bugs with a magnifying glass."),
-    ("kindness", "being friendly and caring", "Sharing your toy is an act of kindness."),
+    ("analyze", "to look closely at something so you can understand it better", "We can analyze a puzzle by checking one piece at a time."),
+    ("predict", "to make a smart guess about what might happen next", "Dark clouds can help us predict that rain may be coming."),
+    ("evidence", "clues or facts that help show whether an idea is true", "Footprints are evidence that someone walked through the mud."),
+    ("strategy", "a plan you use to solve a problem or win a game", "Her chess strategy was to protect her king first."),
+    ("contrast", "to compare things by noticing how they are different", "We can contrast summer and winter by talking about heat and snow."),
+    ("compare", "to look at two things and notice how they are alike or different", "You can compare two books by thinking about their characters."),
+    ("estimate", "to make a careful guess that is close to the real answer", "I estimate there are about fifty jelly beans in the jar."),
+    ("consequence", "what happens because of an action or choice", "A consequence of staying up late is feeling tired the next morning."),
+    ("efficient", "working well without wasting time or effort", "Packing your backpack the night before is an efficient way to get ready."),
+    ("adapt", "to change so you can handle a new situation", "Animals adapt to winter by growing thicker fur or finding shelter."),
+    ("investigate", "to look carefully for facts or clues", "The class investigated why the plant near the window grew faster."),
+    ("communicate", "to share ideas or information with others", "You can communicate by speaking, writing, drawing, or using gestures."),
+    ("perspective", "one person's way of seeing or thinking about something", "From my perspective, the hill looked huge."),
+    ("solution", "an answer or method that fixes a problem", "The solution was to tighten the loose screw."),
+    ("pattern", "something that repeats in a way you can notice", "Red, blue, red, blue is a color pattern."),
+    ("resourceful", "good at finding clever ways to solve problems", "A resourceful builder used cardboard to make a robot arm."),
+    ("precise", "very exact and careful", "A recipe needs precise measurements so the cake turns out right."),
+    ("temporary", "lasting for only a short time", "The blanket fort was temporary because we took it down after dinner."),
+    ("permanent", "meant to last for a long time", "A tree's roots are more permanent than footprints in sand."),
+    ("cooperate", "to work together toward the same goal", "The team had to cooperate to build the tallest tower."),
+    ("curious", "wanting to learn or know more about something", "A curious scientist asks questions and tests ideas."),
+    ("observe", "to look carefully and notice details", "You can observe a snail's trail after it moves across a rock."),
+    ("summarize", "to tell the main idea in a shorter way", "After reading the chapter, she summarized what happened in three sentences."),
+    ("infer", "to figure something out using clues", "If the floor is wet and someone has an umbrella, you might infer it rained."),
+    ("accurate", "correct and close to the truth", "An accurate map helps you find the right trail."),
+    ("flexible", "able to change plans when needed", "A flexible teammate can try a new position during the game."),
+    ("confident", "believing you can try something or handle a challenge", "He felt confident after practicing the song many times."),
+    ("complex", "made of many connected parts", "A city is complex because roads, people, buildings, and rules all work together."),
+    ("fragile", "easy to break or damage", "A glass ornament is fragile, so we carry it carefully."),
+    ("essential", "very important and needed", "Water is essential for plants to grow."),
 )
 
 
@@ -236,7 +246,10 @@ class WordOfDayTool:
     parameters_schema = None
 
     async def run(self, ctx: RoutingContext, arguments: dict[str, Any]) -> ToolResult:
-        word, meaning, example = random.choice(WORD_BANK)
+        learned = await asyncio.to_thread(db.load_learned_words, ctx.profile_id, 500)
+        learned_words = {item.get("word", "").lower() for item in learned}
+        fresh_words = [entry for entry in WORD_BANK if entry[0].lower() not in learned_words]
+        word, meaning, example = random.choice(fresh_words or list(WORD_BANK))
         saved = await asyncio.to_thread(db.save_learned_word, ctx.profile_id, word, meaning, example)
         if not saved:
             logger.warning("Failed to store word of the day for profile_id=%s", ctx.profile_id)
