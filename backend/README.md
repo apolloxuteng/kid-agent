@@ -66,11 +66,11 @@ LMSTUDIO_BASE_URL=http://localhost:1234/v1
 Log output is printed in the **same terminal** where you run `uvicorn`. You’ll see:
 
 - **Request logs** — e.g. `INFO:     127.0.0.1:... "POST /chat HTTP/1.1" 200` (from Uvicorn).
-- **Application logs** — e.g. when the joke API is used:
+- **Application logs** — e.g. timing and direct tool use:
+  - `chat_stream first token ... elapsed=...` — time until the first streamed token.
+  - `chat_stream completed ... total=... save=...` — total request and save timing.
+  - `Direct tool fast path: get_joke` — request was handled without an LLM round trip.
   - `Joke API success: setup='...'... punchline='...'...` — external joke API returned a joke.
-  - `Joke requested and injected into prompt (profile_id=...)` — user asked for a joke and a joke was injected.
-  - `Joke requested but API returned none; ...` — user asked for a joke but the API failed or returned invalid data.
-  - **Pixabay image:** `Image requested; returning Pixabay image (profile_id=...)` — user asked for a picture and an image was fetched and returned. `Pixabay image success: query=...` — image bytes fetched. `PIXABAY_API_KEY not set` — image requests will not fetch real images.
 
 Log level defaults to **INFO**. To change it, set `LOG_LEVEL` before starting the server (e.g. `LOG_LEVEL=DEBUG` for more detail, or `LOG_LEVEL=WARNING` to reduce noise).
 
@@ -86,7 +86,7 @@ Log level defaults to **INFO**. To change it, set `LOG_LEVEL` before starting th
 | GET    | /health | Health check; returns `{"status":"ok"}` |
 | GET    | /profile | Returns the stored child profile for `profile_id` (query: `?profile_id=...`). |
 | GET    | /words | Returns recently taught vocabulary words for `profile_id` (query: `?profile_id=...&limit=100`). |
-| POST   | /chat   | Send a message; body: `{"message": "your text", "profile_id": "uuid-or-id"}`; returns `{"reply": "..."}`. The reply may include **attachments** (e.g. images from tools). The response can contain `attachments`: `[{ "caption", "image_base64", "media_type" }]`; for a single image, `image_base64` and `image_media_type` are also set for backward compatibility. All memory and profile updates apply only to that profile. |
+| POST   | /chat   | Send a message; body: `{"message": "your text", "profile_id": "uuid-or-id"}`; returns `{"reply": "..."}`. All memory and profile updates apply only to that profile. |
 | POST   | /chat/stream | Same as /chat but streams the reply as Server-Sent Events (SSE). See [Streaming](#streaming-post-chatstream) below. |
 | POST   | /reset  | Clear conversation memory for one profile; query: `?profile_id=...`. |
 | POST   | /profile/reset | Clear the child profile (name and interests) for one profile; query: `?profile_id=...`. |
@@ -97,7 +97,7 @@ Log level defaults to **INFO**. To change it, set `LOG_LEVEL` before starting th
 
 - **Event format:** Each SSE event is a single line: `data: <JSON>`. The JSON object can be:
   - `{"token": "..."}` — one piece of the reply; the client should append this to the displayed message.
-  - `{"done": true, "reply": "..."}` — stream finished; `reply` is the full assistant message (use this for history/TTS if you prefer). When tools returned images, the object may include `"attachments": [{ "caption", "image_base64", "media_type" }]` and, for a single image, `"image_base64"` and `"image_media_type"` for backward compatibility.
+  - `{"done": true, "reply": "..."}` — stream finished; `reply` is the full assistant message (use this for history/TTS if you prefer).
   - `{"error": "..."}` — something went wrong (e.g. Ollama down); no reply is stored.
 - **Backward compatibility:** The non-streaming **POST /chat** is unchanged; existing clients keep working.
 
@@ -114,7 +114,7 @@ No backend changes are required beyond calling `/chat/stream` instead of `/chat`
 
 ## Per-profile data (SQLite + optional encryption)
 
-- Each child is identified by **profile_id** (e.g. the app’s UUID for that profile). Data is stored in a single **SQLite database** at **`data/kid_agent.db`** (tables: profiles, summaries, history).
+- Each child is identified by **profile_id** (e.g. the app’s UUID for that profile). Data is stored in a single **SQLite database** at **`data/kid_agent.db`** (tables: profiles, summaries, history, learned_words).
 - **Encryption at rest:** Set the environment variable **`KID_AGENT_DB_KEY`** to a Fernet key to encrypt sensitive columns (name, interests, summary, message content). Generate a key with Python: `from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())`. Losing this key means encrypted data cannot be recovered; keep backups of the key and DB file secure.
 - If `KID_AGENT_DB_KEY` is not set, data is stored in plaintext (existing DB rows remain readable).
 - **Memory is isolated per profile**: history and summary for one child never affect another. Resetting or clearing is per profile_id.
@@ -134,32 +134,21 @@ No backend changes are required beyond calling `/chat/stream` instead of `/chat`
 
 ## Tool calling and direct routing
 
-The backend uses direct local routing for clear requests (joke, fact, quiz, word of the day, picture, calculation) and falls back to the configured model's **tool-calling API** for ambiguous tool requests. The LLM sees tool definitions and returns `tool_calls`; the server runs those tools (in-process or via MCP), then sends results back for a final reply.
+The backend uses direct local routing for clear requests (joke, word of the day, word definition, learned-word review, calculation) and falls back to the configured model's **tool-calling API** for ambiguous tool requests. The LLM sees a small tool set and returns `tool_calls`; the server runs those tools, then sends results back for a final reply.
 
 - **Model:** Use a model/server combination that supports tool calling. For Ollama, examples include **qwen2.5** and **llama3.1**. For LM Studio, enable the local server and use its model id in `MODEL_NAME` (for example `google/gemma-4-26b-a4b`). If the model/server does not support tools, you may get 404, rejected requests, or empty `tool_calls`.
-- **Image handling:** Tool result **text** is sent to the model for the reply; **image bytes** are not sent to the model — they are added only to the response **attachments** for the client. So the model gets a short text summary (e.g. caption) and the client receives the actual image(s).
+- **Active in-process tools:** `get_joke`, `get_word_of_day`, `define_word`, `review_learned_words`, and `calculate`.
 
 ### Adding a local tool
 
-1. In **`routing/local_tools.py`**, implement a tool that satisfies the **in-process tool** protocol: `name`, `description`, `parameters_schema`, and `async def run(ctx, arguments) -> ToolResult`. Use `RoutingContext` (user_message, last_assistant_message, profile_id, conversation_history) and return a `ToolResult(text=..., image=(bytes, media_type) | None)`.
+1. In **`routing/local_tools.py`**, implement a tool that satisfies the **in-process tool** protocol: `name`, `description`, `parameters_schema`, and `async def run(ctx, arguments) -> ToolResult`. Use `RoutingContext` (user_message, last_assistant_message, profile_id, conversation_history) and return a `ToolResult(text=...)`.
 2. Add the tool instance to **`ALL_IN_PROCESS_TOOLS`** in the same file. It will be registered at import time and appear in the list of tools sent to Ollama.
 3. No changes are needed in `server.py` or the if/elif routing — the model will see the new tool and can call it by name.
-
-### MCP servers (external tools)
-
-The backend acts as an **MCP client**: it spawns configured MCP servers (stdio), lists their tools, and calls them when the model requests. Tools from MCP are merged with in-process tools; tool names are **namespaced** by server id (e.g. `my-server/tool_name`).
-
-- **Configuration:** Set **`MCP_SERVERS`** in `.env` to a JSON array, or use **`mcp_servers.json`** in the backend directory. Example: `{ "id": "my-server", "command": "npx", "args": ["-y", "some-mcp-package"] }`. Use `id` (or `name`) to namespace tools. Optional `env` is passed to the subprocess (e.g. for API keys).
-- **Dependency:** Install the MCP client with `pip install mcp`. If `mcp` is not installed, the server runs without MCP (in-process tools only).
-- **Default:** `mcp_servers.json` is empty; add entries to enable MCP tools (requires **Node.js** and **npx** for stdio servers).
-- **Examples:** NASA: `{ "id": "nasa", "command": "npx", "args": ["-y", "@programcomputer/nasa-mcp-server"], "env": { "NASA_API_KEY": "..." } }`.
 
 ## Configuration
 
 - **Environment:** You can put these in a **`backend/.env`** file (loaded automatically; do not commit `.env`). See [Moving the server to another machine](#moving-the-server-to-another-machine-eg-via-github) if you deploy or clone the repo elsewhere.
   - **`KID_AGENT_DB_KEY`** — optional Fernet key for encrypting stored data (see Per-profile data above).
-  - **`PIXABAY_API_KEY`** — optional. When set, the server can return images when the user explicitly asks for a picture (e.g. "Show me a picture of a dog"). Get a free key at [Pixabay API](https://pixabay.com/api/docs/). If not set, image requests are answered by the LLM without fetching a real image.
-  - **`MCP_SERVERS`** — optional. JSON array of MCP server configs (see [MCP servers](#mcp-servers-external-tools) above). Alternatively use `mcp_servers.json` in the backend directory.
 - In **`llm.py`** you can change:
   - **`OLLAMA_URL`** — default `http://localhost:11434/api/generate` (chat uses `/api/chat` automatically).
   - **`LLM_PROVIDER`** — `ollama` by default; set to `lmstudio` to use LM Studio.

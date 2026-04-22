@@ -107,29 +107,27 @@ def _stream_tool_call_accumulator_to_list(acc: dict[int, dict]) -> list[dict]:
     return _parse_tool_calls(raw)
 
 
-SYSTEM_PROMPT_BASE = """CRITICAL — you must use tools for jokes, stories, facts, space pictures, images, quizzes, vocabulary words, and calculations:
+SYSTEM_PROMPT_BASE = """CRITICAL — you must use tools for jokes, vocabulary words, word definitions, word review, and calculations:
 - If the child asks for a joke or something funny → call get_joke. Do not tell a joke from your own knowledge.
-- If they ask for a story or tale → call get_story. Do not make up a story yourself.
-- If they ask for a fact or something interesting → call get_fact. Do not invent a fact.
-- If they ask for a space/astronomy picture → call get_space_picture.
-- If they ask for a picture of something (e.g. dog, castle) → call search_image.
-- If they ask for a quiz or trivia question → call get_quiz.
 - If they ask for a word of the day or to learn a new word → call get_word_of_day.
+- If they ask what a specific word means or ask you to define a word → call define_word.
+- If they ask what words they have learned or want to review words → call review_learned_words.
 - If the child asks for a calculation or math (e.g. what is 5+3, how much is 10 times 2) → call calculate with the expression. Do not compute math yourself.
 Always call the tool first, then use the tool's result in your reply. Never answer those requests without calling the matching tool.
-When you receive a tool result (joke, story, fact, picture description, quiz, word, calculator result), present ONLY that content in a warm way — do not add another joke, story, fact, word, or answer from your own knowledge.
+When you receive a tool result (joke, word, word definition, word review, calculator result), present ONLY that content in a warm way — do not add another joke, word, definition, or answer from your own knowledge.
 
-You are a warm, friendly teacher talking to an 8-year-old child.
+You are a warm, thoughtful tutor talking to a curious 7-year-old child.
 
-Your goal: Be simple and easy to understand, but accurate. Explain real ideas in plain language — never dumb down facts so much that they become wrong or vague. It's okay to use a real word (e.g. "gravity", "planet") and then explain it in one short phrase.
+Your goal: Be clear, accurate, and interesting without sounding babyish. Assume the child can handle real ideas when they are explained well. Use plain language, but do not flatten answers into toddler-level explanations. It is good to use real words like "gravity", "evidence", "orbit", "pattern", or "strategy" and explain them briefly.
 
 Rules you always follow:
-- Use clear, plain language and short sentences. Maximum 3–4 sentences per reply.
-- Be accurate. If the child asks "why" or "how," give a correct explanation in simple terms rather than a cutesy wrong one. If you're not sure, say so simply.
-- Be warm and encouraging without being babyish. Avoid excessive exclamations, baby talk, or repeating their words back in a cutesy way every time.
-- Explain with simple examples when they help (animals, everyday things), but keep the underlying idea correct.
-- You do not need to ask a question every time. Often just reply with a short, warm statement (a reaction, a fact, or encouragement) and let the child lead. Only ask a question occasionally when it fits naturally.
-- Avoid long explanations or jargon. Prefer one clear, accurate idea over a long or fuzzy one.
+- Use a natural, respectful tone. Sound like a smart adult who enjoys explaining things, not like a cartoon character.
+- Keep most replies to 3–6 sentences. If the child asks a deep "why" or "how" question, you may give a fuller answer with 2–3 short paragraphs.
+- Be accurate. If the child asks "why" or "how," give the real explanation in age-appropriate language rather than a cute but wrong shortcut. If you're not sure, say so simply.
+- Avoid baby talk, over-cheering, excessive exclamation marks, and repeating the child's words back in a cutesy way.
+- Use examples when they help, but choose examples that respect a 7-year-old's intelligence: science, games, school, sports, books, building things, nature, and everyday problems.
+- You do not need to ask a question every time. Ask a follow-up only when it genuinely helps the conversation.
+- Avoid long lectures. Prefer a clear explanation with one interesting detail or one useful example.
 - Reply in English only. Do not mix in Chinese or other languages unless the child explicitly asks you to (e.g. "say it in Chinese" or "what's the Chinese word for …").
 - Reply with only your words. Do not include "User:", "Assistant:", or any role labels in your reply.
 
@@ -155,45 +153,6 @@ def get_system_prompt(profile: dict) -> str:
             out += f"- Interests: {', '.join(interests)}\n"
         out += "\nUse this to personalize when it fits (e.g. use their name sometimes, mention their interests). Do not reference the profile in every message — keep it natural.\n\n"
     return out
-
-
-# Stop words for image search keyword fallback (heuristic to avoid LLM call when possible)
-_IMAGE_SEARCH_STOP_WORDS = frozenset(
-    {"show", "me", "a", "an", "the", "picture", "of", "i", "want", "to", "see", "image", "photo", "get", "can", "draw", "please", "give", "something", "is", "it", "for", "and", "or"}
-)
-
-
-def image_search_keywords_heuristic(user_message: str) -> str:
-    """
-    Extract keywords from the user message using a simple heuristic (strip stop words, first 5 words).
-    Use this first to avoid an LLM call; call extract_image_search_keywords only when this returns empty.
-    """
-    if not user_message or not user_message.strip():
-        return ""
-    msg = user_message.strip()[:500].lower().replace(",", " ").replace(".", " ")
-    words = [w for w in msg.split() if w.isalnum() and w not in _IMAGE_SEARCH_STOP_WORDS][:5]
-    return " ".join(words)[:100].strip()
-
-
-async def extract_image_search_keywords(user_message: str) -> str:
-    """
-    Extract 2-5 English keywords for Pixabay image search from the child's message.
-    Uses a one-shot LLM call; falls back to heuristic if LLM fails or returns empty.
-    """
-    if not user_message or not user_message.strip():
-        return ""
-    user_message = user_message.strip()[:500]
-    prompt = (
-        "The child asked for an image. Reply with only 2 to 5 comma-separated English keywords for an image search. Nothing else.\n"
-        f"Child's request: {user_message}"
-    )
-    out = await call_ollama(prompt, timeout=15, raise_on_error=False)
-    if out:
-        # Take first 100 chars, strip, remove extra commas/spaces
-        keywords = " ".join(out.strip().replace(",", " ").split())[:100].strip()
-        if keywords:
-            return keywords
-    return image_search_keywords_heuristic(user_message)
 
 
 async def call_ollama(prompt: str, timeout: int = 30, raise_on_error: bool = False) -> str:
@@ -481,17 +440,9 @@ async def chat_with_tools_stream(messages: list[dict], tools: list[dict], timeou
         raise HTTPException(status_code=500, detail=f"{_provider_name()} took too long to respond.")
 
 
-# Tool names that fetch pictures; used to emit early "Finding a picture..." progress.
-_PICTURE_TOOLS = frozenset({"get_space_picture", "search_image"})
-
-
 def _direct_tool_name_for_message(user_message: str, last_assistant_message: str | None) -> str | None:
     """Return a local tool name for clear, low-risk requests that do not need LLM routing."""
-    from apis import facts as facts_api
     from apis import joke as joke_api
-    from apis import nasa_apod as nasa_apod_api
-    from apis import pixabay as pixabay_api
-    from apis import trivia as trivia_api
     from routing import local_tools
 
     msg = (user_message or "").strip().lower()
@@ -499,16 +450,12 @@ def _direct_tool_name_for_message(user_message: str, last_assistant_message: str
         return None
     if joke_api.user_asking_for_joke(msg):
         return "get_joke"
-    if trivia_api.user_asking_for_quiz(msg):
-        return "get_quiz"
+    if local_tools.user_asking_to_review_words(msg):
+        return "review_learned_words"
     if local_tools.user_asking_for_word_of_day(msg):
         return "get_word_of_day"
-    if nasa_apod_api.user_asking_for_space(msg, last_assistant_message):
-        return "get_space_picture"
-    if pixabay_api.user_asking_for_image(msg):
-        return "search_image"
-    if facts_api.user_asking_for_fact(msg):
-        return "get_fact"
+    if local_tools.extract_definition_word(msg):
+        return "define_word"
     if _looks_like_calculation_request(msg):
         return "calculate"
     return None
@@ -552,7 +499,7 @@ async def run_chat_with_tools_orchestrator(
 ):
     """
     Run the tool-calling chat loop; yields ("progress", message) for early UI feedback
-    (e.g. when a picture tool is chosen) and ("result", (reply, attachments)) when done.
+    and ("result", (reply, attachments)) when done.
     Attachments is a list of (image_bytes, media_type).
     """
     from routing.context import RoutingContext
@@ -560,8 +507,8 @@ async def run_chat_with_tools_orchestrator(
 
     # Short instruction so the model sees it in the same turn as the user message (in case system is ignored).
     _TOOL_USE_REMINDER = (
-        "When the user asks for a joke, story, fact, space picture, image, quiz, word of the day, or a calculation, you MUST call the matching tool "
-        "(get_joke, get_story, get_fact, get_space_picture, search_image, get_quiz, get_word_of_day, calculate). Do not answer from your own knowledge.\n\n"
+        "When the user asks for a joke, word of the day, word definition, word review, or a calculation, you MUST call the matching tool "
+        "(get_joke, get_word_of_day, define_word, review_learned_words, calculate). Do not answer from your own knowledge.\n\n"
     )
 
     def _build_messages() -> list[dict]:
@@ -603,10 +550,8 @@ async def run_chat_with_tools_orchestrator(
         args = {}
         if direct_tool_name == "calculate":
             args["expression"] = _calculator_expression_from_message(ctx.user_message)
-        elif direct_tool_name == "search_image":
-            args["keywords"] = image_search_keywords_heuristic(ctx.user_message)
-        if direct_tool_name in _PICTURE_TOOLS:
-            yield ("progress", "Finding a picture...")
+        elif direct_tool_name == "define_word":
+            args["word"] = local_tools.extract_definition_word(ctx.user_message) or ""
         logger.info("Direct tool fast path: %s", direct_tool_name)
         tool_started = time.perf_counter()
         result = await run_tool(direct_tool_name, ctx, args)
@@ -642,10 +587,6 @@ async def run_chat_with_tools_orchestrator(
             yield ("result", (reply, attachments))
             return
 
-        # Emit progress so the client can show "Finding a picture..." immediately.
-        if any((tc.get("name") or "") in _PICTURE_TOOLS for tc in tool_calls):
-            yield ("progress", "Finding a picture...")
-
         logger.info("Executing tools: %s", [tc["name"] for tc in tool_calls])
         # Append assistant message with tool_calls in the format expected by the active provider.
         assistant_msg = {"role": "assistant", "content": content or ""}
@@ -672,10 +613,10 @@ async def run_chat_with_tools_orchestrator(
         results = await asyncio.gather(*[run_tool(tc["name"], ctx, tc.get("arguments") or {}) for tc in tool_calls])
 
         # Append tool result messages.
-        # Instruct the model to present ONLY this content so it doesn't add its own joke/story/fact.
+        # Instruct the model to present ONLY this content so it doesn't add its own content.
         _TOOL_RESULT_INSTR = (
             "Present ONLY the content below to the child in a warm, kid-friendly way. "
-            "Do not add another joke, story, fact, word, or quiz from your own knowledge.\n\n"
+            "Do not add another joke, word, or answer from your own knowledge.\n\n"
         )
         for i, result in enumerate(results):
             if i < len(tool_calls):
@@ -695,51 +636,3 @@ async def run_chat_with_tools_orchestrator(
     # Max iterations reached; use last content as reply
     reply = strip_role_labels(content if content else "I'm having a little trouble. Want to try again?")
     yield ("result", (reply, attachments))
-
-
-def build_prompt(
-    profile: dict,
-    conversation_summary: str,
-    conversation_history: list[dict],
-    joke: tuple[str, str] | None = None,
-    injected_fact: str | None = None,
-    story_seed: str | None = None,
-) -> str:
-    """Assemble SYSTEM PROMPT + CHILD PROFILE + CONVERSATION SUMMARY + [JOKE/FACT/STORY BLOCKS] + RECENT MESSAGES (last 6)."""
-    parts = [get_system_prompt(profile)]
-
-    if conversation_summary:
-        parts.append("Conversation summary:\n")
-        parts.append(conversation_summary.strip())
-        parts.append("\n\n")
-
-    if joke is not None:
-        setup, punchline = joke
-        parts.append("Joke to deliver (use this):\n")
-        parts.append(f"Setup: {setup}\n")
-        parts.append(f"Punchline: {punchline}\n\n")
-        parts.append("Deliver this joke in a warm, kid-friendly way in one or two sentences.\n\n")
-
-    if injected_fact:
-        parts.append("Use this fact when answering:\n")
-        parts.append(f"{injected_fact}\n\n")
-        parts.append("Explain it simply in 2–3 sentences so the child can understand. Keep it warm and engaging.\n\n")
-
-    if story_seed:
-        parts.append("Use this idea for a short, funny story:\n")
-        parts.append(f"{story_seed}\n\n")
-        parts.append(
-            "Tell an engaging story based on this idea. For this reply only, you may write a longer story (e.g. 6–10 sentences or a short paragraph) "
-            "with a clear beginning, middle, and end. Keep it kid-friendly and fun. The usual 3–4 sentence limit does not apply here.\n\n"
-        )
-
-    recent = conversation_history[-RECENT_MESSAGES_COUNT:] if conversation_history else []
-    if recent:
-        parts.append("Recent messages:\n")
-        for entry in recent:
-            role = "User" if entry["role"] == "user" else "Assistant"
-            parts.append(f"{role}: {entry['content'].strip()}\n")
-        parts.append("\n")
-
-    parts.append("Assistant:")
-    return "".join(parts)

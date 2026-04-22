@@ -3,18 +3,15 @@ In-process tools that wrap existing APIs. Each tool implements InProcessTool (na
 """
 
 import asyncio
+import json
 import logging
 import random
+import re
 from typing import Any
 
-from apis import facts as facts_api
 from apis import joke as joke_api
-from apis import nasa_apod as nasa_apod_api
-from apis import pixabay as pixabay_api
-from apis import stories as stories_api
-from apis import trivia as trivia_api
-import llm
 import db
+import llm
 
 from .context import RoutingContext
 from .protocol import InProcessTool, ollama_tool_definition
@@ -31,6 +28,26 @@ WORD_OF_DAY_REQUEST_PHRASES = (
     "vocabulary word",
     "today's word",
     "todays word",
+)
+
+WORD_REVIEW_REQUEST_PHRASES = (
+    "what words did i learn",
+    "what words have i learned",
+    "words i learned",
+    "learned words",
+    "review my words",
+    "show my words",
+    "show me my words",
+    "what are my words",
+    "which words did i learn",
+    "which words have i learned",
+)
+
+DEFINE_WORD_PATTERNS = (
+    r"what does ['\"]?([a-zA-Z][a-zA-Z\-']{1,30})['\"]? mean\??$",
+    r"what is the meaning of ['\"]?([a-zA-Z][a-zA-Z\-']{1,30})['\"]?\??$",
+    r"what's the meaning of ['\"]?([a-zA-Z][a-zA-Z\-']{1,30})['\"]?\??$",
+    r"define ['\"]?([a-zA-Z][a-zA-Z\-']{1,30})['\"]?\??$",
 )
 
 WORD_BANK: tuple[tuple[str, str, str], ...] = (
@@ -65,6 +82,28 @@ def user_asking_for_word_of_day(message: str) -> bool:
     return any(phrase in lower for phrase in WORD_OF_DAY_REQUEST_PHRASES)
 
 
+def user_asking_to_review_words(message: str) -> bool:
+    """Return True if the message is asking to review previously taught words."""
+    if not message or not message.strip():
+        return False
+    lower = message.strip().lower()
+    return any(phrase in lower for phrase in WORD_REVIEW_REQUEST_PHRASES)
+
+
+def extract_definition_word(message: str) -> str | None:
+    """Extract the target word from clear definition requests."""
+    if not message or not message.strip():
+        return None
+    text = message.strip().lower()
+    for pattern in DEFINE_WORD_PATTERNS:
+        match = re.match(pattern, text, flags=re.IGNORECASE)
+        if match:
+            word = match.group(1).strip(" '\"").lower()
+            if 2 <= len(word) <= 30:
+                return word
+    return None
+
+
 class JokeTool:
     name = "get_joke"
     description = "Get a random kid-friendly joke. Use when the child wants a joke or something funny."
@@ -77,105 +116,6 @@ class JokeTool:
             text = joke_api.format_joke_for_reply(setup, punchline)
             return ToolResult(text=text)
         return ToolResult(text="I couldn't fetch a joke right now. Want to try again?")
-
-
-class StoryTool:
-    name = "get_story"
-    description = "Get a short story or bedtime tale for the child. Use when they ask for a story or tale."
-    parameters_schema = None
-
-    async def run(self, ctx: RoutingContext, arguments: dict[str, Any]) -> ToolResult:
-        story_data = await stories_api.fetch_random_story()
-        if story_data:
-            text = stories_api.format_story_for_reply(
-                story_data["title"], story_data["author"],
-                story_data["story"], story_data["moral"],
-            )
-            return ToolResult(text=text)
-        fact = await facts_api.fetch_random_fact()
-        if fact:
-            return ToolResult(text=f"Story seed: {fact}")
-        return ToolResult(text="I couldn't fetch a story right now. Want to try again?")
-
-
-class FactTool:
-    name = "get_fact"
-    description = "Get a random interesting fact for the child. Use when they ask for a fact or something interesting."
-    parameters_schema = None
-
-    async def run(self, ctx: RoutingContext, arguments: dict[str, Any]) -> ToolResult:
-        fact = await facts_api.fetch_random_fact()
-        if fact:
-            return ToolResult(text=fact)
-        return ToolResult(text="I couldn't fetch a fact right now. Want to try again?")
-
-
-class SpaceTool:
-    name = "get_space_picture"
-    description = (
-        "Get the astronomy picture of the day (NASA APOD) or a random past space picture. "
-        "Use when the child wants a space or astronomy picture, or says 'one more picture' after a space reply."
-    )
-    parameters_schema = None
-
-    async def run(self, ctx: RoutingContext, arguments: dict[str, Any]) -> ToolResult:
-        use_random_date = bool(
-            ctx.last_assistant_message
-            and nasa_apod_api.last_message_suggests_space(ctx.last_assistant_message)
-            and nasa_apod_api.user_asking_for_another_picture(ctx.user_message)
-        )
-        apod = await nasa_apod_api.fetch_apod(use_random_date=use_random_date)
-        if not apod:
-            return ToolResult(text="I couldn't fetch the space picture right now. Want to try again?")
-        img_bytes, media_type, title, explanation = apod
-        first_sentence = (explanation.split(".")[0].strip() + ".") if explanation else ""
-        if use_random_date:
-            text = f"Here's another space picture! {title}. {first_sentence}" if first_sentence else f"Here's another space picture! {title}"
-        else:
-            text = f"Here's today's space picture! {title}. {first_sentence}" if first_sentence else f"Here's today's space picture! {title}"
-        return ToolResult(text=text, image=(img_bytes, media_type))
-
-
-class SearchImageTool:
-    name = "search_image"
-    description = (
-        "Search for a picture by keywords (e.g. dog, castle, sunset). "
-        "Use when the child wants a picture of something that is not space/astronomy."
-    )
-    parameters_schema = {
-        "type": "object",
-        "properties": {
-            "keywords": {
-                "type": "string",
-                "description": "2-5 English keywords for the image search (e.g. 'dog', 'sunset castle').",
-            },
-        },
-    }
-
-    async def run(self, ctx: RoutingContext, arguments: dict[str, Any]) -> ToolResult:
-        keywords = (arguments.get("keywords") or "").strip() if isinstance(arguments, dict) else ""
-        if not keywords:
-            keywords = llm.image_search_keywords_heuristic(ctx.user_message)
-        if not keywords:
-            keywords = await llm.extract_image_search_keywords(ctx.user_message)
-        result = await pixabay_api.fetch_image(keywords)
-        if result:
-            img_bytes, media_type = result
-            return ToolResult(text="Here's a picture for you!", image=(img_bytes, media_type))
-        return ToolResult(text="I couldn't find a picture for that right now. Want to try different words?")
-
-
-class QuizTool:
-    name = "get_quiz"
-    description = "Get a kid-friendly trivia or quiz question (multiple choice). Use when the child wants a quiz or question."
-    parameters_schema = None
-
-    async def run(self, ctx: RoutingContext, arguments: dict[str, Any]) -> ToolResult:
-        quiz_data = await trivia_api.fetch_quiz_question()
-        if quiz_data:
-            text = trivia_api.format_quiz_for_reply(quiz_data)
-            return ToolResult(text=text)
-        return ToolResult(text="I couldn't fetch a quiz question right now. Want to try again?")
 
 
 def _safe_eval_expression(expr: str):
@@ -304,23 +244,86 @@ class WordOfDayTool:
         return ToolResult(text=text)
 
 
+class ReviewWordsTool:
+    name = "review_learned_words"
+    description = "Review vocabulary words that have already been taught to this child."
+    parameters_schema = None
+
+    async def run(self, ctx: RoutingContext, arguments: dict[str, Any]) -> ToolResult:
+        words = await asyncio.to_thread(db.load_learned_words, ctx.profile_id, 10)
+        if not words:
+            return ToolResult(text="We haven't learned any words yet. Tap Learn and I'll teach you one!")
+        names = [w["word"] for w in words if w.get("word")]
+        if len(names) == 1:
+            text = f"You have learned this word so far: {names[0]}."
+        else:
+            text = "You have learned these words so far: " + ", ".join(names) + "."
+        return ToolResult(text=text)
+
+
+class DefineWordTool:
+    name = "define_word"
+    description = "Explain the meaning of a specific English word and store it for review."
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "word": {
+                "type": "string",
+                "description": "The English word to define.",
+            },
+        },
+    }
+
+    async def run(self, ctx: RoutingContext, arguments: dict[str, Any]) -> ToolResult:
+        raw_word = (arguments.get("word") or "").strip().lower() if isinstance(arguments, dict) else ""
+        word = raw_word or extract_definition_word(ctx.user_message or "") or ""
+        word = re.sub(r"[^a-zA-Z\-']", "", word).lower()
+        if not word or len(word) > 30:
+            return ToolResult(text="Tell me one word, like: What does curious mean?")
+
+        fallback_meaning = f"the meaning of the word {word}"
+        fallback_example = f"I learned the word {word} today."
+        prompt = (
+            "Explain one English vocabulary word for a curious 7-year-old. "
+            "Return only JSON with keys word, meaning, example. "
+            "The meaning should be one clear sentence. The example should be one natural sentence using the word. "
+            f"Word: {word}"
+        )
+        data = await llm.call_ollama(prompt, timeout=20, raise_on_error=False)
+        meaning = fallback_meaning
+        example = fallback_example
+        if data:
+            try:
+                parsed = json.loads(data)
+                parsed_word = str(parsed.get("word") or word).strip().lower()
+                if parsed_word:
+                    word = re.sub(r"[^a-zA-Z\-']", "", parsed_word).lower() or word
+                parsed_meaning = str(parsed.get("meaning") or "").strip()
+                parsed_example = str(parsed.get("example") or "").strip()
+                if parsed_meaning:
+                    meaning = parsed_meaning
+                if parsed_example:
+                    example = parsed_example
+            except (json.JSONDecodeError, TypeError, ValueError):
+                logger.warning("Definition JSON parse failed for word=%s response=%r", word, data[:200])
+
+        saved = await asyncio.to_thread(db.save_learned_word, ctx.profile_id, word, meaning, example)
+        if not saved:
+            logger.warning("Failed to store defined word for profile_id=%s word=%s", ctx.profile_id, word)
+        return ToolResult(text=f"{word.capitalize()} means {meaning} Example: {example}")
+
+
 # Singleton instances for the registry
 JOKE_TOOL = JokeTool()
-STORY_TOOL = StoryTool()
-FACT_TOOL = FactTool()
-SPACE_TOOL = SpaceTool()
-SEARCH_IMAGE_TOOL = SearchImageTool()
-QUIZ_TOOL = QuizTool()
 CALCULATOR_TOOL = CalculatorTool()
 WORD_OF_DAY_TOOL = WordOfDayTool()
+REVIEW_WORDS_TOOL = ReviewWordsTool()
+DEFINE_WORD_TOOL = DefineWordTool()
 
 ALL_IN_PROCESS_TOOLS: list[InProcessTool] = [
     JOKE_TOOL,
-    STORY_TOOL,
-    FACT_TOOL,
-    SPACE_TOOL,
-    SEARCH_IMAGE_TOOL,
-    QUIZ_TOOL,
     CALCULATOR_TOOL,
     WORD_OF_DAY_TOOL,
+    REVIEW_WORDS_TOOL,
+    DEFINE_WORD_TOOL,
 ]

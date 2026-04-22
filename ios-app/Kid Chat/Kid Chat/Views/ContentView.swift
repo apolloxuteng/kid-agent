@@ -22,6 +22,8 @@ struct ContentView: View {
     @StateObject private var speechRecognizer = SpeechRecognizer()
     /// When true, the profile picker sheet is presented (triggered by tapping avatar in header).
     @State private var showProfilePicker = false
+    /// When true, the learned words review sheet is presented.
+    @State private var showWordReview = false
     /// When true, the conversation settings sheet is presented (voice, mute, background).
     @State private var showSettings = false
     /// When non-nil, show this emoji floating up from bottom center; one per last AI message.
@@ -84,8 +86,14 @@ struct ContentView: View {
                         }
                         .modifier(ThemedHeaderButtonModifier(accentGradient: conversationSettings.accentGradient))
                         .accessibilityLabel("Back to mode selection")
-                .accessibilityHint("Returns to choose Ask, Laugh, or Learn mode and starts a new conversation")
+                        .accessibilityHint("Returns to choose Ask, Laugh, or Learn mode and starts a new conversation")
                         Spacer(minLength: 0)
+                        Button(action: { showWordReview = true }) {
+                            Label("Words", systemImage: "textformat.abc")
+                                .font(.system(size: 16, weight: .medium, design: .rounded))
+                        }
+                        .modifier(ThemedHeaderButtonModifier(accentGradient: conversationSettings.accentGradient))
+                        .accessibilityLabel("Review learned words")
                         Button(action: { showSettings = true }) {
                             Image(systemName: "gearshape")
                                 .font(.system(size: 20, weight: .medium))
@@ -178,6 +186,9 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showProfilePicker) {
                 ProfilePickerView()
+            }
+            .sheet(isPresented: $showWordReview) {
+                WordReviewView(profileId: profileManager.activeProfile?.id, accentGradient: conversationSettings.accentGradient)
             }
             .sheet(isPresented: $showSettings) {
                 ConversationSettingsView(settings: conversationSettings)
