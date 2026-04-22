@@ -503,6 +503,7 @@ async def run_chat_with_tools_orchestrator(
     and ("result", (reply, attachments)) when done.
     Attachments is a list of (image_bytes, media_type).
     """
+    from routing import local_tools
     from routing.context import RoutingContext
     from routing.registry import get_ollama_tool_definitions, run_tool
 
