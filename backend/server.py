@@ -397,6 +397,16 @@ async def get_words(profile_id: str, limit: int = 100):
     return {"words": await asyncio.to_thread(db.load_learned_words, profile_id, limit)}
 
 
+@app.delete("/words/{word_id}")
+async def delete_word(word_id: int, profile_id: str):
+    """Deletes one taught vocabulary word for the given profile_id."""
+    db.validate_profile_id(profile_id)
+    deleted = await asyncio.to_thread(db.delete_learned_word, profile_id, word_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Word not found.")
+    return {"status": "word deleted"}
+
+
 @app.post("/profile/reset")
 async def reset_profile(profile_id: str):
     """Clears the child profile (name and interests) for this profile_id."""

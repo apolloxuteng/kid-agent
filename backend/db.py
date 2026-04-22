@@ -299,7 +299,7 @@ def load_learned_words(profile_id: str, limit: int = 100) -> list[dict]:
     try:
         rows = conn.execute(
             """
-            SELECT word, meaning, example, taught_at FROM learned_words
+            SELECT id, word, meaning, example, taught_at FROM learned_words
             WHERE profile_id = ?
             ORDER BY id DESC
             LIMIT ?
@@ -307,13 +307,32 @@ def load_learned_words(profile_id: str, limit: int = 100) -> list[dict]:
             (profile_id, limit),
         ).fetchall()
         out = []
-        for word_raw, meaning_raw, example_raw, taught_at in rows:
+        for word_id, word_raw, meaning_raw, example_raw, taught_at in rows:
             out.append({
+                "id": word_id,
                 "word": decrypt_cell(word_raw) or "",
                 "meaning": decrypt_cell(meaning_raw) or "",
                 "example": decrypt_cell(example_raw) or "",
                 "taught_at": taught_at,
             })
         return out
+    finally:
+        conn.close()
+
+
+def delete_learned_word(profile_id: str, word_id: int) -> bool:
+    """Delete one learned vocabulary word for this profile. Returns True if a row was deleted."""
+    validate_profile_id(profile_id)
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cursor = conn.execute(
+            "DELETE FROM learned_words WHERE profile_id = ? AND id = ?",
+            (profile_id, int(word_id)),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    except (sqlite3.Error, ValueError, TypeError) as e:
+        logger.exception("Failed to delete learned word for profile_id=%s word_id=%s: %s", profile_id, word_id, e)
+        return False
     finally:
         conn.close()

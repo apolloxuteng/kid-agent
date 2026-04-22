@@ -86,6 +86,7 @@ Log level defaults to **INFO**. To change it, set `LOG_LEVEL` before starting th
 | GET    | /health | Health check; returns `{"status":"ok"}` |
 | GET    | /profile | Returns the stored child profile for `profile_id` (query: `?profile_id=...`). |
 | GET    | /words | Returns recently taught vocabulary words for `profile_id` (query: `?profile_id=...&limit=100`). |
+| DELETE | /words/{word_id} | Deletes one learned word for `profile_id` (query: `?profile_id=...`). |
 | POST   | /chat   | Send a message; body: `{"message": "your text", "profile_id": "uuid-or-id"}`; returns `{"reply": "..."}`. All memory and profile updates apply only to that profile. |
 | POST   | /chat/stream | Same as /chat but streams the reply as Server-Sent Events (SSE). See [Streaming](#streaming-post-chatstream) below. |
 | POST   | /reset  | Clear conversation memory for one profile; query: `?profile_id=...`. |

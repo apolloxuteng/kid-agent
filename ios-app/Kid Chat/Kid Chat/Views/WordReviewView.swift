@@ -13,15 +13,14 @@ private struct LearnedWordsResponse: Decodable {
 }
 
 private struct LearnedWord: Decodable, Identifiable {
+    let id: Int
     let word: String
     let meaning: String
     let example: String
     let taughtAt: String
 
-    var id: String { "\(word)-\(taughtAt)" }
-
     enum CodingKeys: String, CodingKey {
-        case word, meaning, example
+        case id, word, meaning, example
         case taughtAt = "taught_at"
     }
 }
@@ -37,6 +36,7 @@ struct WordReviewView: View {
     @State private var quizIndex = 0
     @State private var showMeaning = false
     @State private var isLoading = false
+    @State private var deletingWordIds: Set<Int> = []
     @State private var errorMessage: String?
 
     var body: some View {
@@ -114,9 +114,25 @@ struct WordReviewView: View {
             LazyVStack(spacing: 12) {
                 ForEach(words) { item in
                     VStack(alignment: .leading, spacing: 8) {
-                        Text(item.word.capitalized)
-                            .font(.system(size: 24, weight: .bold, design: .rounded))
-                            .foregroundStyle(KidTheme.bubbleTextAI)
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Text(item.word.capitalized)
+                                .font(.system(size: 24, weight: .bold, design: .rounded))
+                                .foregroundStyle(KidTheme.bubbleTextAI)
+                            Spacer()
+                            Button {
+                                Task { await deleteWord(item) }
+                            } label: {
+                                Image(systemName: deletingWordIds.contains(item.id) ? "hourglass" : "trash")
+                                    .font(.system(size: 16, weight: .semibold))
+                                    .foregroundStyle(KidTheme.bubbleTextAI.opacity(0.65))
+                                    .frame(width: 34, height: 34)
+                                    .background(Color.white.opacity(0.68))
+                                    .clipShape(Circle())
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(deletingWordIds.contains(item.id))
+                            .accessibilityLabel("Remove \(item.word)")
+                        }
                         Text(item.meaning)
                             .font(.system(size: 17, weight: .medium, design: .rounded))
                             .foregroundStyle(KidTheme.bubbleTextAI.opacity(0.9))
@@ -228,6 +244,42 @@ struct WordReviewView: View {
             let decoded = try JSONDecoder().decode(LearnedWordsResponse.self, from: data)
             words = decoded.words
             resetQuiz()
+        } catch {
+            errorMessage = "Could not reach the word list."
+        }
+    }
+
+    @MainActor
+    private func deleteWord(_ item: LearnedWord) async {
+        guard let profileId else {
+            errorMessage = "Choose a profile first."
+            return
+        }
+        guard let url = URL(string: ChatViewModel.SERVER_BASE + "/words/\(item.id)?profile_id=\(profileId.uuidString)") else {
+            errorMessage = "Could not remove that word."
+            return
+        }
+
+        deletingWordIds.insert(item.id)
+        defer { deletingWordIds.remove(item.id) }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                errorMessage = "Could not remove that word."
+                return
+            }
+            words.removeAll { $0.id == item.id }
+            quizWords.removeAll { $0.id == item.id }
+            if words.isEmpty || quizWords.isEmpty {
+                resetQuiz()
+            } else if quizIndex >= quizWords.count {
+                quizIndex = max(0, quizWords.count - 1)
+                showMeaning = false
+            }
         } catch {
             errorMessage = "Could not reach the word list."
         }
