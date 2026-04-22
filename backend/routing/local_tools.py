@@ -114,6 +114,25 @@ def extract_definition_word(message: str) -> str | None:
     return None
 
 
+def _parse_definition_json(text: str) -> dict | None:
+    """Parse JSON from plain output or markdown-fenced output."""
+    if not text:
+        return None
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        cleaned = cleaned[start : end + 1]
+    try:
+        parsed = json.loads(cleaned)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 class JokeTool:
     name = "get_joke"
     description = "Get a random kid-friendly joke. Use when the child wants a joke or something funny."
@@ -306,8 +325,8 @@ class DefineWordTool:
         meaning = fallback_meaning
         example = fallback_example
         if data:
-            try:
-                parsed = json.loads(data)
+            parsed = _parse_definition_json(data)
+            if parsed:
                 parsed_word = str(parsed.get("word") or word).strip().lower()
                 if parsed_word:
                     word = re.sub(r"[^a-zA-Z\-']", "", parsed_word).lower() or word
@@ -317,7 +336,7 @@ class DefineWordTool:
                     meaning = parsed_meaning
                 if parsed_example:
                     example = parsed_example
-            except (json.JSONDecodeError, TypeError, ValueError):
+            else:
                 logger.warning("Definition JSON parse failed for word=%s response=%r", word, data[:200])
 
         saved = await asyncio.to_thread(db.save_learned_word, ctx.profile_id, word, meaning, example)

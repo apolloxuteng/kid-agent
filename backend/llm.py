@@ -31,6 +31,7 @@ MODEL_NAME = os.environ.get(
     "google/gemma-4-26b-a4b" if LLM_PROVIDER == "lmstudio" else "qwen2.5",
 )
 MAX_TOOL_LOOP_ITERATIONS = 5
+DIRECT_RETURN_TOOLS = frozenset({"get_joke", "get_word_of_day", "review_learned_words", "define_word", "calculate"})
 
 
 def set_ollama_client(client: httpx.AsyncClient | None) -> None:
@@ -611,6 +612,20 @@ async def run_chat_with_tools_orchestrator(
 
         # Run all tools in parallel
         results = await asyncio.gather(*[run_tool(tc["name"], ctx, tc.get("arguments") or {}) for tc in tool_calls])
+
+        if (
+            len(tool_calls) == 1
+            and (tool_calls[0].get("name") or "") in DIRECT_RETURN_TOOLS
+            and results
+        ):
+            result = results[0]
+            if result and result.image:
+                attachments.append(result.image)
+            reply = strip_role_labels(result.text if result else "I'm having a little trouble. Want to try again?")
+            logger.info("Returning direct tool result without second LLM call: %s", tool_calls[0].get("name"))
+            yield ("token", reply)
+            yield ("result", (reply, attachments))
+            return
 
         # Append tool result messages.
         # Instruct the model to present ONLY this content so it doesn't add its own content.
